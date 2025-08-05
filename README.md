@@ -111,6 +111,6 @@ python app.py
 
 ## 🙌 Contributors
 - Endla Akhil Balaji (@the-ab04)
-- Mandala Sriman Narayana
-- Adi Sai Kiran
-- Mohammad Sohel
+- Adi Sai Kiran (@adhi8724r)
+- Mandala Sriman Narayana (@Sriman117)
+- Mohammad Sohel (@sohellucky)
