@@ -38,7 +38,7 @@ It leverages pre-trained LLMs such as GPT-2, T5, and StarCoder to understand ML 
 ---
 
 ## 📂 Folder Structure (Planned)
-
+```
 Code2Paper/
 ├── backend/                    # Python backend (Flask or FastAPI)
 │   ├── app.py                  # Entry point for the backend
@@ -79,7 +79,7 @@ Code2Paper/
 ├── LICENSE                     # MIT license
 ├── README.md                   # Main project overview
 └── .gitignore                  # Git ignore config
-
+```
 
 ---
 
@@ -103,13 +103,13 @@ python -m venv venv
 source venv/bin/activate  # or venv\Scripts\activate on Windows
 pip install -r requirements.txt
 python app.py
+```
 
-
-📌 Project Status
+## 📌 Project Status
 🚧 In Progress
 
 
-🙌 Contributors
+## 🙌 Contributors
 Endla Akhil Balaji (@the-ab04)
 Mandala Sriman Narayana
 Adi Sai Kiran

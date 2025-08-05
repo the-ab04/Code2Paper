@@ -1,0 +1,67 @@
+# ========================
+# Python (backend)
+# ========================
+__pycache__/
+*.py[cod]
+*.egg
+*.egg-info/
+*.env
+.env
+venv/
+ENV/
+env/
+Pipfile.lock
+*.log
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints/
+
+# Virtual environment wrapper directories
+.vscode/
+.idea/
+
+# PyInstaller build
+dist/
+build/
+
+# PDF or docx outputs
+*.pdf
+*.docx
+outputs/
+
+# ========================
+# Node.js (React frontend)
+# ========================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+build/
+dist/
+.cache/
+*.env.local
+
+# ========================
+# OS-specific
+# ========================
+.DS_Store
+Thumbs.db
+
+# ========================
+# Misc
+# ========================
+*.bak
+*.swp
+*.tmp
+
+# Logs
+*.log
+
+# Mac/Linux trash
+.Trash-*
+
+# Windows Recycle Bin
+$RECYCLE.BIN/
+
+# Optional: ignore all .env files globally
+.env
