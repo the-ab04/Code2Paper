@@ -110,7 +110,7 @@ python app.py
 
 
 ## 🙌 Contributors
-Endla Akhil Balaji (@the-ab04)
-Mandala Sriman Narayana
-Adi Sai Kiran
-Mohammad Sohel
+- Endla Akhil Balaji (@the-ab04)
+- Mandala Sriman Narayana
+- Adi Sai Kiran
+- Mohammad Sohel
