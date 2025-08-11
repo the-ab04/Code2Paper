@@ -1,67 +1,155 @@
 # ========================
 # Python (backend)
 # ========================
+
+# Bytecode and cache (already there, but just in case)
 __pycache__/
 *.py[cod]
+*.pyo
+
+# Distribution / packaging
 *.egg
 *.egg-info/
-*.env
-.env
+dist/
+build/
+pip-wheel-metadata/
+
+# Virtual environments (already there)
 venv/
 ENV/
 env/
-Pipfile.lock
+
+# Environment variables (already there)
+.env
+*.env
+*.env.*
+
+# Logs and debug files (already there)
 *.log
 
-# Jupyter notebooks checkpoints
+# Jupyter notebook checkpoints (already there)
 .ipynb_checkpoints/
 
-# Virtual environment wrapper directories
+# IDE config files (you have .vscode and .idea)
 .vscode/
 .idea/
 
-# PyInstaller build
+# PyInstaller (already there)
 dist/
 build/
 
-# PDF or docx outputs
-*.pdf
-*.docx
-outputs/
+# Test output coverage reports
+.coverage
+.tox/
+.pytest_cache/
+
+# Mypy cache
+.mypy_cache/
+
+# Pylint cache
+.pylint.d/
+
+# VS Code settings files and history (optional)
+.history/
 
 # ========================
 # Node.js (React frontend)
 # ========================
+
+# Node modules (already there)
 node_modules/
+
+# Logs (already there)
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Build output (already there)
 build/
 dist/
+frontend/build/
+
+# Cache (already there)
 .cache/
+
+# Environment variables (already there)
 *.env.local
 
+# Package lock (optional if you want to avoid conflicts)
+package-lock.json
+yarn.lock
+
 # ========================
-# OS-specific
+# OS-specific (already there)
 # ========================
+
 .DS_Store
 Thumbs.db
 
 # ========================
-# Misc
+# Miscellaneous (already there)
 # ========================
+
 *.bak
 *.swp
 *.tmp
-
-# Logs
-*.log
-
-# Mac/Linux trash
 .Trash-*
-
-# Windows Recycle Bin
 $RECYCLE.BIN/
 
-# Optional: ignore all .env files globally
-.env
+# ========================
+# Uploads / outputs (already there)
+# ========================
+
+uploads/
+**/uploads/
+outputs/
+**/outputs/
+
+# ========================
+# Hugging Face cache (already there)
+# ========================
+
+~/.cache/huggingface/
+.huggingface/
+
+# ========================
+# Others you might want to consider
+# ========================
+
+# Coverage reports (if using pytest-cov or coverage.py)
+htmlcov/
+.coverage
+.coverage.*
+
+# Sphinx documentation build
+docs/_build/
+
+# pytest cache
+.pytest_cache/
+
+# Local history for JetBrains IDEs
+.idea/.idea.LocalHistory/
+
+# Mac-specific
+.AppleDouble/
+.LSOverride
+
+# npm package-lock or yarn.lock (you have package-lock.json, consider yarn.lock too)
+yarn.lock
+
+# Logs directory (if any)
+logs/
+
+# Temporary files created by editors
+*~
+
+# Environment configuration for Docker (if using)
+.env.docker
+
+# Database files if any local db is used (e.g. SQLite)
+*.sqlite3
+
+# Secret or key files
+*.pem
+*.key
+

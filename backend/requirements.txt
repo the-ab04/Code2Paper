@@ -1,0 +1,12 @@
+flask
+flask-cors
+werkzeug
+transformers
+torch
+reportlab
+requests
+nbformat
+asttokens
+regex
+python-dotenv
+
