@@ -1,31 +1,48 @@
-import React, { useState } from "react";
-import FileUpload from "./components/FileUpload";
-import SectionSelector from "./components/SectionSelector";
-import OutputPanel from "./components/OutputPanel";
-import { generatePaper } from "./api";
+import { useState } from 'react';
+import Header from './components/Header';
+import UploadCard from './components/UploadCard';
+import PaperPreview from './components/PaperPreview';
+import { generatePaper } from './api/client';
 
-function App() {
-  const [filePath, setFilePath] = useState(null);
-  const [pdfPath, setPdfPath] = useState(null);
+export default function App() {
+  const [loading, setLoading] = useState(false);
+  const [pdfUrl, setPdfUrl] = useState('');
 
-  const handleGenerate = async (sections) => {
-    if (!filePath) return alert("Please upload a file first");
-    const data = await generatePaper(filePath, sections);
-    if (data.pdf_path) {
-      setPdfPath(data.pdf_path);
-    } else {
-      alert("Generation failed");
+  const handleGenerate = async (fd) => {
+    try {
+      setLoading(true);
+      const res = await generatePaper(fd);
+
+      if (res.job_id) {
+        // Use CRA env variable instead of import.meta
+        const base = process.env.REACT_APP_API_URL || 'http://localhost:8001';
+        setPdfUrl(`${base}/paper/download/${res.job_id}`);
+      } else if (res.pdf_path) {
+        setPdfUrl(res.pdf_path);
+      }
+    } catch (e) {
+      alert('Error: ' + (e?.response?.data?.detail || e.message));
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-gray-100 p-6">
-      <h1 className="text-3xl font-bold text-center mb-8">🧠 Code2Paper</h1>
-      <FileUpload onUpload={setFilePath} />
-      {filePath && <SectionSelector onGenerate={handleGenerate} />}
-      <OutputPanel pdfPath={pdfPath} />
+    <div>
+      <Header />
+      <main className="max-w-6xl mx-auto px-6 pb-20">
+        <section className="mt-6 md:mt-10">
+          <div className="mb-6">
+            <h2 className="text-2xl md:text-3xl font-semibold tracking-tight">Turn Notebooks into Papers</h2>
+            <p className="text-slate-400 mt-2">
+              Upload a .ipynb notebook. We’ll parse facts, write sections with Groq, add citations, and export a LaTeX-quality PDF.
+            </p>
+          </div>
+          <UploadCard onSubmit={handleGenerate} loading={loading} />
+          <PaperPreview url={pdfUrl} />
+        </section>
+      </main>
+      <footer className="text-center text-xs text-slate-500 py-8">© {new Date().getFullYear()} Code2Paper</footer>
     </div>
   );
 }
-
-export default App;

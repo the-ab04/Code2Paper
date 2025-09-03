@@ -1,133 +1,63 @@
-# backend/routes/paper_routes.py
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi.responses import FileResponse, JSONResponse
+import tempfile, os, uuid, traceback
 
-import os
-import uuid
-from flask import Blueprint, request, jsonify, send_file, current_app
-from werkzeug.utils import secure_filename
+from services.code_parser import parse_notebook
+from services.llm_generator import generate_sections
+from services.citation_manager import enrich_references
+from services.file_generator import render_docx  # ✅ Only DOCX generator
+from config import MODEL_NAME
 
-from services.code_parser import parse_code_metadata
-from services.llm_generator import generate_section_text, init_llm
-from services.citation_manager import find_top_crossref_for_term
-from services.pdf_generator import build_pdf_from_sections
+router = APIRouter()
 
-# Create blueprint
-paper_bp = Blueprint("paper_bp", __name__)
-
-# Directories (relative to backend/)
-BASE_DIR = os.path.dirname(os.path.dirname(__file__))
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# Track whether LLM init has been done
-_first_init_done = False
-
-
-@paper_bp.before_app_request
-def startup():
-    """
-    Initializes heavy resources (like LLM) once, before handling the first request.
-    Flask 3.x removed before_app_first_request for blueprints, so we handle manually.
-    """
-    global _first_init_done
-    if not _first_init_done:
-        current_app.logger.info("Initializing LLM for the first request...")
-        init_llm()
-        _first_init_done = True
-
-
-@paper_bp.route("/upload", methods=["POST"])
-def upload_file():
-    """
-    Accepts multipart form file field named 'file'.
-    Returns JSON with saved file_path on success.
-    """
-    if 'file' not in request.files:
-        return jsonify({"error": "No file part"}), 400
-    file = request.files['file']
-    if file.filename == "":
-        return jsonify({"error": "No selected file"}), 400
-
-    filename = secure_filename(file.filename)
-    uid = str(uuid.uuid4())[:8]
-    save_name = f"{uid}_{filename}"
-    path = os.path.join(UPLOAD_DIR, save_name)
-    file.save(path)
-    return jsonify({"status": "uploaded", "file_path": path})
-
-
-@paper_bp.route("/generate", methods=["POST"])
-def generate():
-    """
-    POST JSON:
-    {
-      "file_path": "backend/uploads/abcd_sample.py"  (or relative path),
-      "sections": ["abstract","methodology","results"]
-    }
-    """
-    data = request.get_json(force=True)
-    file_path = data.get("file_path")
-    sections = data.get("sections", ["abstract", "methodology", "results", "conclusion"])
-
-    if not file_path:
-        return jsonify({"error": "file_path field is required"}), 400
-
-    # Allow either absolute path or path relative to backend
-    if not os.path.isabs(file_path):
-        file_path = os.path.join(BASE_DIR, file_path)
-        file_path = os.path.abspath(file_path)
-
-    if not os.path.exists(file_path):
-        return jsonify({"error": "file not found", "path": file_path}), 400
-
-    # 1) Parse code and extract metadata
-    metadata = parse_code_metadata(file_path)
-
-    # 2) Generate the requested sections
-    results = {}
-    for sec in sections:
-        prompt_data = {"section": sec, "metadata": metadata}
-        text = generate_section_text(prompt_data)
-        results[sec] = text
-
-    # 3) Get a citation candidate (non-blocking)
-    citation = None
+@router.post("/generate")
+async def generate_paper(
+    nb_file: UploadFile = File(...),
+    style: str = Form(None),
+    title: str = Form(None),
+    author: str = Form(None)
+):
     try:
-        keywords = metadata.get("keywords", [])
-        if keywords:
-            citation = find_top_crossref_for_term(keywords[0])
-    except Exception:
-        citation = None
+        # ✅ Validate file type
+        if not nb_file.filename.endswith(".ipynb"):
+            raise HTTPException(status_code=400, detail="Only .ipynb files are supported.")
 
-    # 4) Create PDF
-    pdf_filename = f"{str(uuid.uuid4())[:8]}_paper.pdf"
-    pdf_path = os.path.join(OUTPUT_DIR, pdf_filename)
-    build_pdf_from_sections(results, metadata, citation, pdf_path)
+        # ✅ Temporary directory for processing
+        tmp_dir = tempfile.mkdtemp(prefix="code2paper_")
+        nb_path = os.path.join(tmp_dir, nb_file.filename)
+        with open(nb_path, "wb") as f:
+            f.write(await nb_file.read())
 
-    return jsonify({
-        "status": "generated",
-        "sections": list(results.keys()),
-        "pdf_path": pdf_path,
-        "citation": citation
-    })
+        # ✅ Parse notebook
+        try:
+            facts = parse_notebook(nb_path)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error parsing notebook: {str(e)}")
 
+        # ✅ Generate sections using LLM
+        try:
+            sections = generate_sections(facts, model_name=MODEL_NAME)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error generating sections: {str(e)}")
 
-@paper_bp.route("/download", methods=["GET"])
-def download():
-    """
-    Query param: ?path=/absolute/or/relative/path/to/pdf
-    """
-    path = request.args.get("path")
-    if not path:
-        return jsonify({"error": "path param required"}), 400
+        # ✅ Enrich references with CrossRef
+        try:
+            sections = enrich_references(sections)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error enriching references: {str(e)}")
 
-    # If relative, assume outputs folder
-    if not os.path.isabs(path):
-        path = os.path.join(BASE_DIR, path)
-        path = os.path.abspath(path)
+        # ✅ Generate DOCX only
+        out_file = os.path.join(tmp_dir, f"paper_{uuid.uuid4().hex}.docx")
+        try:
+            render_docx(sections, out_file, title=title, author=author, style=style)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error generating DOCX: {str(e)}")
 
-    if not os.path.exists(path):
-        return jsonify({"error": "file not found", "path": path}), 404
+        return FileResponse(out_file, filename="code2paper_output.docx", media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
-    return send_file(path, as_attachment=True)
+    except HTTPException as e:
+        return JSONResponse(status_code=e.status_code, content={"error": e.detail})
+    except Exception as e:
+        error_trace = traceback.format_exc()
+        print(f"Unhandled Exception:\n{error_trace}")
+        return JSONResponse(status_code=500, content={"error": f"Unexpected error: {str(e)}"})

@@ -1,12 +1,47 @@
-flask
-flask-cors
-werkzeug
-transformers
-torch
-reportlab
-requests
-nbformat
-asttokens
-regex
-python-dotenv
 
+#fastapi==0.115.0
+#uvicorn[standard]==0.30.6
+#python-multipart==0.0.9
+
+
+# Parsing
+#nbformat==5.10.4
+
+# LLM via LangChain
+#langchain==0.2.14
+#langchain-openai==0.1.22
+#langchain-groq==0.1.9
+
+# Requests for CrossRef
+##requests==2.32.3
+
+# Pandoc/LaTeX for PDF
+#pypandoc==1.13
+#pandocfilters==1.5.0
+
+# Optional scientific helpers
+#pandas==2.1.4
+
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-dotenv==1.0.1
+python-multipart==0.0.9
+
+# Parsing
+nbformat==5.10.4
+
+# LLM via LangChain
+langchain==0.2.14
+langchain-openai==0.1.22
+langchain-groq==0.1.9
+
+# Requests for CrossRef
+requests==2.32.3
+
+# Pandoc/LaTeX for PDF
+pypandoc==1.13
+pandocfilters==1.5.0
+Jinja2==3.1.4
+
+
+python-docx

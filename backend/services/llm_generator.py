@@ -1,94 +1,86 @@
-# backend/services/llm_generator.py
-"""
-LLM generator module.
-Behavior:
- - If env var USE_STUB_LLM=1 -> uses a deterministic simple template generator (fast, no downloads).
- - Otherwise attempts to load a HF text-generation pipeline (gpt2 by default).
-Adjust model and device as needed.
-"""
-import os
-import logging
+from typing import Dict, Any
+from config import GROQ_API_KEY, MODEL_NAME
+from langchain_groq import ChatGroq
+import json, re
 
-USE_STUB = os.environ.get("USE_STUB_LLM", "1") == "1"  # default to stub for faster dev
-MODEL_NAME = os.environ.get("LLM_MODEL", "gpt2")  # change to a larger model if desired
+SYSTEM_PROMPT = (
+    "You are an assistant that converts Jupyter notebooks into structured academic paper sections. "
+    "Write concise, factual text in formal academic tone. "
+    "Include methods, experiments, results, and limitations. "
+    "For citations, insert placeholders in the format [CITATION: query] where query is the title or DOI. "
+    "Return ONLY valid JSON (no markdown, no code fences)."
+)
 
-_text_gen = None
+def _get_llm(model_name: str | None = None):
+    """Initialize the Groq LLM client."""
+    if not GROQ_API_KEY:
+        raise RuntimeError("GROQ_API_KEY is missing in config.")
+    return ChatGroq(model=model_name or MODEL_NAME, temperature=0.2, groq_api_key=GROQ_API_KEY)
 
-def init_llm():
-    global _text_gen
-    if USE_STUB:
-        logging.info("Using STUB LLM (no model download). Set USE_STUB_LLM=0 to use real HF model.")
-        _text_gen = None
-        return
+def _extract_json(text: str) -> str:
+    """Extract a clean JSON string from LLM output."""
+    # Remove markdown fences like ```json ... ```
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.S)
+    if fence:
+        text = fence.group(1)
 
-    # Lazy import heavy libs
+    # Extract from first '{' to last '}'
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end != -1:
+        text = text[start:end + 1]
+
+    # Remove trailing commas
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+
+    # Normalize quotes
+    text = (text.replace("\u201c", '"')
+                .replace("\u201d", '"')
+                .replace("\u2018", "'")
+                .replace("\u2019", "'"))
+    return text.strip()
+
+def generate_sections(facts: Dict[str, Any], model_name: str | None = None) -> Dict[str, str]:
+    """Generate structured academic paper sections with citation placeholders."""
+    llm = _get_llm(model_name)
+
+    # Prepare notebook content
+    md = "\n\n".join(facts.get("markdown", []))[:6000]
+    code_hint = "\n".join(facts.get("code", [])[:3])
+    logs = "\n".join(facts.get("logs", [])[:10])
+
+    # Prompt requiring JSON output
+    prompt = (
+        f"{SYSTEM_PROMPT}\n\n"
+        f"Notebook markdown (truncated):\n{md}\n\n"
+        f"Sample code (truncated):\n{code_hint}\n\n"
+        f"Training/metrics logs (sample):\n{logs}\n\n"
+        "Write the following sections with citations as placeholders [CITATION: query]:\n"
+        "1. Title\n2. Abstract\n3. Introduction\n4. Methods\n5. Experiments\n"
+        "6. Results\n7. Discussion\n8. Conclusion\n9. References (array of queries for citations)\n\n"
+        "Output strictly as JSON with keys: title, abstract, introduction, methods, experiments, "
+        "results, discussion, conclusion, references."
+    )
+
+    # Invoke LLM
+    resp = llm.invoke(prompt)
+    raw = getattr(resp, "content", str(resp))
+    cleaned = _extract_json(raw)
+
     try:
-        from transformers import pipeline, set_seed
-    except Exception as e:
-        logging.error("transformers not available: %s", e)
-        raise
+        data = json.loads(cleaned)
+    except Exception:
+        cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
+        data = json.loads(cleaned)
 
-    if _text_gen is None:
-        _text_gen = pipeline("text-generation", model=MODEL_NAME, device=-1)  # device=-1 => CPU
-        set_seed(42)
+    # Normalize result
+    result: Dict[str, str] = {}
+    for key in ["title", "abstract", "introduction", "methods", "experiments", "results", "discussion", "conclusion"]:
+        result[key] = str(data.get(key, "")).strip()
 
-def _build_prompt(section, metadata):
-    if section.lower() == "abstract":
-        prompt = (
-            "Write a concise academic abstract for a machine learning project. "
-            f"Key details: keywords={metadata.get('keywords')}, hyperparams={metadata.get('simple_meta')}. "
-            "Summarize objective, approach, and expected outcome in 2-4 sentences."
-        )
-    elif section.lower() in ("methodology", "methods"):
-        prompt = (
-            "Write the Methodology section describing the model architecture and training approach. "
-            f"Metadata: classes={metadata.get('class_names')}, functions={metadata.get('func_names')}, hyper={metadata.get('simple_meta')}."
-        )
-    elif section.lower() == "results":
-        prompt = (
-            "Write a Results section describing how evaluation is performed. "
-            "If no numeric results are available, include placeholder text describing recommended metrics and reporting style."
-        )
-    elif section.lower() == "conclusion":
-        prompt = (
-            "Write a short Conclusion summarizing contributions, limitations, and future work."
-        )
+    refs = data.get("references", [])
+    if isinstance(refs, list):
+        result["references"] = "\n".join([str(r).strip() for r in refs if r])
     else:
-        prompt = f"Write a short {section} section for an ML project."
-    return prompt
+        result["references"] = str(refs or "").strip()
 
-def generate_section_text(prompt_data):
-    section = prompt_data.get("section", "abstract")
-    metadata = prompt_data.get("metadata", {})
-
-    # If using stub, return a deterministic template
-    if USE_STUB:
-        # simple templated output, safe and instant
-        km = ", ".join(metadata.get("keywords", [])[:5]) or "ML code"
-        hm = ", ".join([f"{k}={v}" for k, v in metadata.get("simple_meta", {}).items()]) or "default hyperparameters"
-        if section.lower() == "abstract":
-            return (f"This work presents an implementation of {km}. "
-                    f"The approach uses a standard model configuration with {hm}. "
-                    "Experiments were run on the code provided and demonstrate the expected pipeline for training and evaluation.")
-        elif section.lower() in ("methodology", "methods"):
-            return (f"The code defines model components ({', '.join(metadata.get('class_names', [])[:3])}). "
-                    "Training uses common optimization routines and standard data preprocessing. "
-                    f"Hyperparameters: {hm}.")
-        elif section.lower() == "results":
-            return ("Results are reported using standard metrics such as accuracy and loss. "
-                    "If no numeric output is present in the code, include measured test/validation metrics here.")
-        elif section.lower() == "conclusion":
-            return ("We provide a straightforward pipeline from data loading to model evaluation. "
-                    "Future work includes more experiments and ablation studies.")
-        else:
-            return f"A short {section} section for the project."
-
-    # Otherwise, use HF pipeline
-    global _text_gen
-    if _text_gen is None:
-        init_llm()
-
-    prompt = _build_prompt(section, metadata)
-    # small generation for responsiveness; tune max_length for quality
-    out = _text_gen(prompt, max_length=150, num_return_sequences=1)
-    return out[0]["generated_text"]
+    return result

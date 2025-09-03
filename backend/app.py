@@ -1,20 +1,22 @@
-# backend/app.py
-from flask import Flask
-from flask_cors import CORS
-from routes.paper_routes import paper_bp
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from config import ALLOWED_ORIGINS
+from routes.paper_routes import router as paper_router
 
-def create_app():
-    app = Flask(__name__)
-    CORS(app)  # Enable CORS for all origins (for testing)
-    app.register_blueprint(paper_bp)
-    return app
+app = FastAPI(title="Code2Paper Backend", version="1.0.0")
 
-app = create_app()
+# CORS for React dev servers
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS or ["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-@app.route("/")
-def home():
-    return "Code2Paper backend running"
+@app.get("/")
+def root():
+    return {"status": "ok", "service": "code2paper"}
 
-if __name__ == "__main__":
-    # Use debug=False in production
-    app.run(debug=True, port=5000, host="127.0.0.1")
+# API routes
+app.include_router(paper_router)#, prefix="/api/paper", tags=["paper"])
