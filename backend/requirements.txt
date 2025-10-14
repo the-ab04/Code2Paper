@@ -1,33 +1,10 @@
-
-#fastapi==0.115.0
-#uvicorn[standard]==0.30.6
-#python-multipart==0.0.9
-
-
-# Parsing
-#nbformat==5.10.4
-
-# LLM via LangChain
-#langchain==0.2.14
-#langchain-openai==0.1.22
-#langchain-groq==0.1.9
-
-# Requests for CrossRef
-##requests==2.32.3
-
-# Pandoc/LaTeX for PDF
-#pypandoc==1.13
-#pandocfilters==1.5.0
-
-# Optional scientific helpers
-#pandas==2.1.4
-
+# Web framework
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 python-dotenv==1.0.1
 python-multipart==0.0.9
 
-# Parsing
+# Parsing notebooks
 nbformat==5.10.4
 
 # LLM via LangChain
@@ -35,13 +12,27 @@ langchain==0.2.14
 langchain-openai==0.1.22
 langchain-groq==0.1.9
 
-# Requests for CrossRef
+# Requests
 requests==2.32.3
 
-# Pandoc/LaTeX for PDF
+# PDF / LaTeX
 pypandoc==1.13
 pandocfilters==1.5.0
 Jinja2==3.1.4
 
-
+# Microsoft Word & Zotero integration
 python-docx
+pyzotero
+
+# PostgreSQL driver
+psycopg2-binary
+
+# Pydantic & email validation
+pydantic[email]
+email-validator
+
+# Optional scientific helpers
+pandas==2.1.4
+qdrant-client
+PyPDF2
+sentence-transformers

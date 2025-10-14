@@ -36,8 +36,7 @@ export default function UploadCard({ onSubmit, loading }) {
     }
 
     const fd = new FormData();
-    fd.append('nb_file', f); // ✅ Match backend parameter
-    fd.append('style', 'ieee');
+    fd.append('file', f);   // ✅ matches backend parameter
     fd.append('title', title);
     fd.append('author', author);
 
