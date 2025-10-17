@@ -1,10 +1,11 @@
 # backend/routes/paper_routes.py
 
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Body
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from typing import List
-import shutil, os, uuid
+from typing import List, Optional, Dict, Any
+import shutil, os, uuid, re
 
 from db.base import get_db
 from db import crud, schemas
@@ -12,8 +13,8 @@ from services.code_parser import parse_notebook
 from services.llm_generator import generate_sections
 from services.file_generator import render_docx
 from services.citation_manager import enrich_references
-from services.paper_finder import find_papers  # external papers
-from services.reset_manager import full_reset    # ✅ NEW
+from services.paper_finder import find_papers, find_and_persist_papers
+from services.reset_manager import full_reset
 
 router = APIRouter(prefix="/api/paper", tags=["paper"])
 
@@ -22,15 +23,22 @@ OUTPUT_DIR = "storage/outputs"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+CITATION_PATTERN = re.compile(r"\[CITATION:\s*([^\]]+)\]", re.I)
 
-# === Upload Notebook/Code to Start a Run ===
+
+class GenerateRequest(BaseModel):
+    """Request body schema for /generate/{run_id}"""
+    sections: Optional[List[str]] = None
+    use_rag: bool = True
+
+
 @router.post("/upload", response_model=schemas.RunOut)
 def upload_notebook(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """
-    Upload a Jupyter Notebook (.ipynb) or script file.
-    Resets DB, Qdrant, and storage before creating a new Run.
+    Upload notebook/script and create a new run.
+    (Current behavior: full reset before new run.)
     """
-    # Step 0: Reset everything for a fresh run
+    # Reset system for a fresh run (keep current behavior, remove if undesired)
     full_reset(db)
 
     if not (file.filename.endswith(".ipynb") or file.filename.endswith(".py")):
@@ -45,13 +53,38 @@ def upload_notebook(file: UploadFile = File(...), db: Session = Depends(get_db))
     return run
 
 
-# === Generate Paper from a Run ===
+def _normalize_requested_sections(sections: Optional[List[str]]) -> Optional[List[str]]:
+    """Normalize client provided sections to canonical lowercase names or return None if not provided."""
+    if not sections:
+        return None
+    canonical = {"title", "abstract", "introduction", "methods", "experiments", "results", "discussion", "conclusion", "references"}
+    out = []
+    for s in sections:
+        if not s:
+            continue
+        s_norm = str(s).strip().lower()
+        if s_norm in canonical:
+            out.append(s_norm)
+    return out or None
+
+
 @router.post("/generate/{run_id}")
-def generate_paper(run_id: int, db: Session = Depends(get_db)):
+def generate_paper(
+    run_id: int,
+    payload: GenerateRequest = Body(...),
+    db: Session = Depends(get_db),
+):
     """
-    Parse notebook, generate sections with LLM,
-    discover related papers, enrich with citations,
-    render DOCX, save file, and return download URL.
+    Generate paper sections for a run.
+    Workflow:
+      1. parse notebook -> facts
+      2. discover candidate papers (persist & index) if use_rag True
+      3. call LLM to generate requested sections (passing candidate_papers when available)
+         - If candidate_papers exist, RAG is disabled so the LLM uses ONLY the candidate list.
+      4. persist any remaining candidate papers (best-effort)
+      5. enrich/resolve citation placeholders and persist citations
+      6. ALWAYS assemble final References from DB citations (ordered)
+      7. render DOCX, update run status and return download URL
     """
     run = crud.get_run(db, run_id)
     if not run:
@@ -63,39 +96,158 @@ def generate_paper(run_id: int, db: Session = Depends(get_db)):
     # Step 1: Parse notebook → structured facts
     facts = parse_notebook(run.input_file)
 
-    # Step 2: Generate paper sections with LLM
-    sections = generate_sections(facts)
+    # Normalize requested sections
+    requested_sections = _normalize_requested_sections(payload.sections)
 
-    # Step 3: Find external papers (CrossRef + ArXiv + index in Qdrant)
+    # Step 2: Determine & persist candidate papers (before generation) if RAG requested
     queries = facts.get("datasets", []) + facts.get("metrics", [])
     if not queries:
-        queries = ["machine learning"]  # fallback
-    external_papers = find_papers(queries, max_results=5)
-    print(f"✅ Found and indexed {len(external_papers)} external papers")
+        queries = ["machine learning"]
 
-    # Step 4: Enrich references (resolve placeholders, insert papers/citations in DB)
-    sections = enrich_references(sections, run_id=run.id, db=db)
+    external_papers: List[Dict[str, Any]] = []
+    if payload.use_rag:
+        try:
+            persisted = find_and_persist_papers(queries, run.id, db, max_results=5)
+            external_papers = persisted or []
+            print(f"✅ Persisted and indexed {len(external_papers)} external papers for run {run.id}")
+        except Exception as e:
+            print(f"[Paper Finder] find_and_persist_papers failed: {e} — falling back to find_papers()")
+            try:
+                external_papers = find_papers(queries, max_results=5)
+            except Exception as e2:
+                print(f"[Paper Finder] find_papers() failed as well: {e2}")
+                external_papers = []
 
-    # Step 5: Render DOCX to outputs folder
+    # Step 3: Generate sections with LLM
+    # If we have persisted candidate papers, we force the LLM to use ONLY those candidates:
+    #  - pass candidate_papers parameter
+    #  - disable external RAG retrieval by setting use_rag=False to avoid mixing in other sources
+    try:
+        if external_papers:
+            print(f"✅ Calling LLM with {len(external_papers)} candidate papers (RAG disabled).")
+            sections: Dict[str, str] = generate_sections(
+                facts,
+                sections_to_generate=requested_sections,
+                use_rag=False,  # disable external retrieval, rely only on candidate_papers
+                candidate_papers=external_papers
+            )
+        else:
+            # No candidate list: follow requested use_rag flag
+            print("ℹ️ No candidate papers persisted. Calling LLM with use_rag=", payload.use_rag)
+            sections = generate_sections(
+                facts,
+                sections_to_generate=requested_sections,
+                use_rag=payload.use_rag
+            )
+    except TypeError:
+        # backward compatibility: generate_sections may not accept candidate_papers
+        sections = generate_sections(
+            facts,
+            sections_to_generate=requested_sections,
+            use_rag=payload.use_rag
+        )
+
+    # Step 4: Persist candidate papers if they weren't persisted earlier
+    # (crud.add_paper is idempotent w.r.t DOI, so this is safe.)
+    try:
+        if external_papers:
+            for p in external_papers:
+                try:
+                    paper_schema = schemas.PaperBase(
+                        title=p.get("title", "") or "No title",
+                        authors=p.get("authors"),
+                        year=int(p.get("year")) if p.get("year") else None,
+                        venue=p.get("venue") or p.get("container") or p.get("source"),
+                        doi=p.get("doi"),
+                        url=p.get("url"),
+                        pdf_path=p.get("pdf_path", None),
+                    )
+                    crud.add_paper(db, run.id, paper_schema)
+                except Exception as e:
+                    print(f"[DB] Failed to add candidate paper: {e}")
+    except Exception as e:
+        print(f"[Paper persistence] unexpected error: {e}")
+
+    # Step 5: Enrich references if there are placeholders
+    placeholders_exist = any(CITATION_PATTERN.search(text or "") for text in sections.values())
+    if placeholders_exist:
+        try:
+            sections = enrich_references(sections, run_id=run.id, db=db)
+        except Exception as e:
+            print(f"[Citation Manager] error while enriching references: {e}")
+
+    # --- NEW STEP: Build final References section from DB citations (deterministically)
+    try:
+        db_citations = crud.get_citations_by_run(db, run.id) or []
+        # Sort by citation.index (if present and >0), else by id to keep deterministic order.
+        def _cit_sort_key(c):
+            idx = getattr(c, "index", None) or 0
+            # Put indexed citations first (index > 0), then unindexed by id
+            return (0 if idx and idx > 0 else 1, idx if idx else getattr(c, "id", 0))
+
+        citations_sorted = sorted(db_citations, key=_cit_sort_key)
+
+        refs_from_db: List[str] = []
+        assigned_seq = 1  # fallback numbering for citations without explicit index
+        for c in citations_sorted:
+            # ensure we have the latest paper record
+            paper = db.query(crud.models.Paper).filter(crud.models.Paper.id == c.paper_id).first()
+            if not paper:
+                continue
+            if not paper.title:
+                continue  # skip incomplete DB rows
+
+            # determine index to display: prefer c.index if >0 else assigned_seq (and advance assigned_seq)
+            display_index = c.index if (c.index and c.index > 0) else assigned_seq
+            if not (c.index and c.index > 0):
+                assigned_seq += 1
+
+            authors = paper.authors or "Unknown Author"
+            title = paper.title or "Unknown Title"
+            venue = paper.venue or ""
+            year = getattr(paper, "year", "") or ""
+            doi = paper.doi or ""
+            # Basic IEEE-style line (keep simple & consistent)
+            ref_line = f"[{display_index}] {authors}, \"{title},\" {venue}, {year}. DOI: {doi}"
+            refs_from_db.append(ref_line)
+
+        # Only overwrite references if we found anything from DB; otherwise leave existing sections["references"]
+        if refs_from_db:
+            sections["references"] = "\n".join(refs_from_db)
+        else:
+            # if there is no references created by LLM or DB, ensure there is a fallback message
+            if not sections.get("references"):
+                sections["references"] = "No references available."
+    except Exception as e:
+        print(f"[References Assembly] failed to build references from DB: {e}")
+
+    # If user requested a subset of sections and explicitly omitted 'references', drop it from final content
+    if requested_sections is not None and "references" not in requested_sections:
+        sections.pop("references", None)
+
+    # Step 6: Render DOCX to outputs
     file_id = str(uuid.uuid4())
     out_path = os.path.join(OUTPUT_DIR, f"{file_id}.docx")
-    render_docx(sections, out_file=out_path, title=sections.get("title", "Generated Paper"))
+    try:
+        title_for_doc = sections.get("title") or os.path.splitext(os.path.basename(run.input_file))[0]
+        render_docx(sections, out_file=out_path, title=title_for_doc)
+    except Exception as e:
+        print(f"[File Generator] error while rendering DOCX: {e}")
+        raise HTTPException(status_code=500, detail="Failed to render document")
 
-    # Step 6: Update DB with file path + completed status
+    # Step 7: Update DB run status
     crud.update_run_status(db, run.id, status="completed", output_file=out_path)
 
+    produced_sections = list(sections.keys())
     return {
         "run_id": run.id,
-        "download_url": f"/api/paper/download/{run.id}"
+        "produced_sections": produced_sections,
+        "download_url": f"/api/paper/download/{run.id}",
     }
 
 
-# === Download Generated Paper ===
 @router.get("/download/{run_id}")
 def download_paper(run_id: int, db: Session = Depends(get_db)):
-    """
-    Serve the generated DOCX file for download.
-    """
     run = crud.get_run(db, run_id)
     if not run or not run.output_file or not os.path.exists(run.output_file):
         raise HTTPException(status_code=404, detail="Generated file not found")
@@ -108,7 +260,6 @@ def download_paper(run_id: int, db: Session = Depends(get_db)):
     )
 
 
-# === Get Run by ID (with linked papers/citations) ===
 @router.get("/runs/{run_id}", response_model=schemas.RunOut)
 def get_run(run_id: int, db: Session = Depends(get_db)):
     run = crud.get_run(db=db, run_id=run_id)
@@ -117,7 +268,6 @@ def get_run(run_id: int, db: Session = Depends(get_db)):
     return run
 
 
-# === List All Runs ===
 @router.get("/runs", response_model=List[schemas.RunOut])
 def list_runs(db: Session = Depends(get_db)):
     return db.query(crud.models.Run).all()

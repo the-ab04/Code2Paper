@@ -14,7 +14,6 @@ GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
 
 # Model
 MODEL_NAME: str = os.getenv("MODEL_NAME", "llama-3.3-70b-versatile")
-
 # -------------------------------------------------------------------
 # 🔹 Server
 # -------------------------------------------------------------------

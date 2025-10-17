@@ -8,7 +8,12 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [fileUrl, setFileUrl] = useState('');
 
-  const handleUploadAndGenerate = async (formData) => {
+  /**
+   * onSubmit now receives two args from UploadCard:
+   *  - formData: FormData with the notebook and metadata
+   *  - sections: array of section names the user wants generated
+   */
+  const handleUploadAndGenerate = async (formData, sections = []) => {
     try {
       setLoading(true);
 
@@ -19,10 +24,11 @@ export default function App() {
       }
       const runId = uploadRes.id;
 
-      // === Step 2: Generate paper → backend returns { run_id, download_url } ===
-      const genRes = await generatePaper(runId);
+      // === Step 2: Generate paper → pass selected sections to backend ===
+      // generatePaper should accept (runId, sections)
+      const genRes = await generatePaper(runId, sections);
+
       if (genRes?.download_url) {
-        // ✅ Ensure base URL comes from .env or fallback localhost
         const base = process.env.REACT_APP_API_URL || 'http://localhost:8001';
         setFileUrl(`${base}${genRes.download_url}`);
       } else {

@@ -1,119 +1,134 @@
-# backend/services/citation_manager.py
-
 import re
-import requests
-from typing import Dict, List
+from typing import Dict, List, Any
 from sqlalchemy.orm import Session
 from db import crud, schemas
 
-CROSSREF_API = "https://api.crossref.org/works"
+# regex to detect citation placeholders like [CITATION: ...]
+CITATION_PATTERN = re.compile(r"\[CITATION:\s*([^\]]+)\]", re.I)
 
 
-# === CrossRef Metadata Fetch ===
-def fetch_crossref_metadata(query: str) -> dict:
-    """
-    Fetch metadata from CrossRef using a title or DOI query.
-    Returns the first matching metadata item or an empty dict if not found.
-    """
-    try:
-        response = requests.get(
-            CROSSREF_API,
-            params={"query": query, "rows": 1, "mailto": "your-real-email@example.com"},  # 👈 replace with real email
-            timeout=8,
-        )
-        if response.status_code == 200:
-            items = response.json().get("message", {}).get("items", [])
-            if items:
-                return items[0]
-    except Exception as e:
-        print(f"[CrossRef Error] Failed for '{query}': {e}")
-    return {}
+def _paper_record_is_complete(paper: Any) -> bool:
+    """Ensure a paper record has all required IEEE-style fields."""
+    if not paper:
+        return False
+    required_fields = [
+        getattr(paper, "title", None),
+        getattr(paper, "authors", None),
+        getattr(paper, "year", None),
+        getattr(paper, "venue", None),
+        getattr(paper, "doi", None),
+    ]
+    if any(not (v and str(v).strip()) for v in required_fields):
+        return False
+    return True
 
 
-# === Format Reference (IEEE style) ===
-def format_reference(meta: dict) -> str:
-    """Convert CrossRef metadata into IEEE-style reference."""
-    title = meta.get("title", ["Unknown Title"])[0]
-    authors_list = meta.get("author", [])
-    authors = ", ".join(
-        [f"{a.get('given','')[:1]}. {a.get('family','')}" for a in authors_list if a.get("family")]
-    ) if authors_list else "Unknown Author"
-    year = meta.get("issued", {}).get("date-parts", [[None]])[0][0] or "n.d."
-    container = meta.get("container-title", [""])[0]
-    volume = meta.get("volume", "")
-    issue = meta.get("issue", "")
-    pages = meta.get("page", "")
-    doi = meta.get("DOI", "N/A")
-
-    ref = f"{authors}, \"{title},\" {container}"
-    if volume:
-        ref += f", vol. {volume}"
-    if issue:
-        ref += f", no. {issue}"
-    if pages:
-        ref += f", pp. {pages}"
-    ref += f", {year}. DOI: {doi}"
-    return ref
+def _format_reference(paper: Any, index: int) -> str:
+    """Format a paper record into IEEE-style reference text."""
+    authors = paper.authors or "Unknown Author"
+    title = paper.title or "Untitled"
+    venue = paper.venue or ""
+    year = getattr(paper, "year", "") or "n.d."
+    doi = paper.doi or "N/A"
+    return f"[{index}] {authors}, \"{title},\" {venue}, {year}. DOI: {doi}"
 
 
-# === Main Function ===
 def enrich_references(sections: Dict[str, str], run_id: int, db: Session) -> Dict[str, str]:
     """
-    Process [CITATION: ...] placeholders:
-      1. Detect unique queries
-      2. Fetch metadata, insert into DB
-      3. Replace placeholders with [n]
-      4. Build numbered References section
+    Updated enrich_references():
+      ✅ Works fully offline — only uses locally persisted & complete papers in DB.
+      ✅ Resolves placeholders [CITATION: query] to local paper entries by DOI or title match.
+      ✅ Builds the References section purely from DB data.
     """
-    citation_pattern = re.compile(r"\[CITATION:\s*([^\]]+)\]")
-
+    # Step 1: collect unique placeholders
     unique_queries: List[str] = []
-    query_to_index: Dict[str, int] = {}
+    for text in sections.values():
+        if not text:
+            continue
+        for match in CITATION_PATTERN.findall(text):
+            q = match.strip()
+            if q not in unique_queries:
+                unique_queries.append(q)
 
-    # Step 1: Collect unique queries
-    for sec_text in sections.values():
-        for match in citation_pattern.findall(sec_text):
-            query = match.strip()
-            if query not in query_to_index:
-                unique_queries.append(query)
-                query_to_index[query] = len(unique_queries)  # [1], [2], ...
-
-    # Step 2: Replace placeholders in text
-    for sec_name, sec_text in sections.items():
-        sections[sec_name] = citation_pattern.sub(
-            lambda m: f"[{query_to_index.get(m.group(1).strip(), '?')}]",
-            sec_text,
-        )
-
-    # Step 3: Insert into DB + build reference list
-    enriched_refs: List[str] = []
-    for query in unique_queries:
-        meta = fetch_crossref_metadata(query)
-
-        if meta:
-            paper_schema = schemas.PaperBase(
-                title=meta.get("title", ["Unknown Title"])[0],
-                authors=", ".join(
-                    f"{a.get('given','')} {a.get('family','')}" for a in meta.get("author", [])
-                ) if meta.get("author") else None,
-                year=meta.get("issued", {}).get("date-parts", [[None]])[0][0],
-                venue=meta.get("container-title", [""])[0],
-                doi=meta.get("DOI"),
-                url=meta.get("URL"),
-            )
-            # Save paper + citation in DB
-            db_paper = crud.add_paper(db, run_id, paper_schema)
-            crud.add_citation(
-                db, run_id, db_paper.id,
-                schemas.CitationBase(context=query, index=query_to_index[query])
+    # Step 2: resolve placeholders to local DB papers only
+    query_to_paper = {}
+    unresolved = []
+    for q in unique_queries:
+        paper = None
+        # try DOI exact match
+        paper = db.query(crud.models.Paper).filter(crud.models.Paper.doi == q).first()
+        if not paper:
+            # try title partial match (case-insensitive)
+            paper = (
+                db.query(crud.models.Paper)
+                .filter(crud.models.Paper.title.ilike(f"%{q}%"))
+                .first()
             )
 
-            ref_text = format_reference(meta)
+        if paper and _paper_record_is_complete(paper):
+            query_to_paper[q] = paper
+            try:
+                crud.add_citation(db, run_id, paper.id, schemas.CitationBase(context=q, index=0))
+            except Exception as e:
+                print(f"[DB Error] failed to add citation for '{q}': {e}")
         else:
-            ref_text = query  # fallback to raw query
+            unresolved.append(q)
 
-        enriched_refs.append(f"[{query_to_index[query]}] {ref_text}")
+    # Step 3: assign stable numeric indices
+    for idx, (q, paper) in enumerate(query_to_paper.items(), start=1):
+        try:
+            db_cite = (
+                db.query(crud.models.Citation)
+                .filter(crud.models.Citation.run_id == run_id)
+                .filter(crud.models.Citation.paper_id == paper.id)
+                .order_by(crud.models.Citation.id.desc())
+                .first()
+            )
+            if db_cite:
+                db_cite.index = idx
+                db.commit()
+        except Exception as e:
+            print(f"[DB Error] citation index update failed for '{q}': {e}")
 
-    # Step 4: Update References section
-    sections["references"] = "\n".join(enriched_refs) if enriched_refs else "No references available."
+    # Step 4: replace placeholders with numeric references
+    def _replace_placeholder(match):
+        q = match.group(1).strip()
+        if q in query_to_paper:
+            # find index from citation
+            cite = (
+                db.query(crud.models.Citation)
+                .filter(crud.models.Citation.run_id == run_id)
+                .filter(crud.models.Citation.paper_id == query_to_paper[q].id)
+                .first()
+            )
+            if cite and cite.index:
+                return f"[{cite.index}]"
+        return match.group(0)
+
+    for name, text in sections.items():
+        if not text:
+            continue
+        sections[name] = CITATION_PATTERN.sub(_replace_placeholder, text)
+
+    # Step 5: Build final References section purely from DB (only complete papers)
+    citations = (
+        db.query(crud.models.Citation)
+        .filter(crud.models.Citation.run_id == run_id)
+        .order_by(crud.models.Citation.index)
+        .all()
+    )
+
+    formatted_refs = []
+    for cite in citations:
+        p = db.query(crud.models.Paper).filter(crud.models.Paper.id == cite.paper_id).first()
+        if p and _paper_record_is_complete(p):
+            formatted_refs.append(_format_reference(p, cite.index or len(formatted_refs) + 1))
+
+    if formatted_refs:
+        sections["references"] = "\n".join(formatted_refs)
+    else:
+        sections["references"] = "No references available."
+
+    # Optional debug info
+    sections["_unresolved_placeholders"] = unresolved
     return sections

@@ -5,7 +5,7 @@ const base = process.env.REACT_APP_API_URL || 'http://localhost:8001';
 
 const api = axios.create({
   baseURL: base,
-  timeout: 60000, // 60s timeout
+  timeout: 300000, // 60s timeout
 });
 
 /**
@@ -26,13 +26,24 @@ export async function uploadNotebook(formData) {
 }
 
 /**
- * Generate paper from an existing run → returns { run_id, download_url }
- * @param {number} runId
+ * Generate paper from an existing run → returns { run_id, download_url, produced_sections }
+ * @param {number|string} runId
+ * @param {Array<string>|null} sections Optional list of sections to generate (e.g. ["abstract","methods"])
+ * @param {boolean} use_rag Whether to include RAG retrieval when generating (default true)
  * @returns {Promise<Object>}
  */
-export async function generatePaper(runId) {
+export async function generatePaper(runId, sections = null, use_rag = true) {
   try {
-    const res = await api.post(`/api/paper/generate/${runId}`);
+    const payload = {
+      // if sections is null, backend will generate all sections
+      sections: sections,
+      use_rag: use_rag,
+    };
+
+    const res = await api.post(`/api/paper/generate/${runId}`, payload, {
+      headers: { 'Content-Type': 'application/json' },
+    });
+
     return res.data;
   } catch (error) {
     console.error('Generate Paper Error:', error.response?.data || error.message);
@@ -41,8 +52,8 @@ export async function generatePaper(runId) {
 }
 
 /**
- * Download a generated paper (DOCX) → triggers file download
- * @param {number} runId
+ * Download a generated paper (DOCX) → returns Blob
+ * @param {number|string} runId
  * @returns {Promise<Blob>}
  */
 export async function downloadPaper(runId) {
@@ -57,7 +68,7 @@ export async function downloadPaper(runId) {
 
 /**
  * Fetch metadata of a specific run
- * @param {number} runId
+ * @param {number|string} runId
  * @returns {Promise<Object>}
  */
 export async function getRun(runId) {

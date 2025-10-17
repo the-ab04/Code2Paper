@@ -1,9 +1,23 @@
 import { useState, useRef } from 'react';
 
+const DEFAULT_SECTIONS = [
+  'title',
+  'abstract',
+  'introduction',
+  'methods',
+  'experiments',
+  'results',
+  'discussion',
+  'conclusion',
+];
+
 export default function UploadCard({ onSubmit, loading }) {
   const [fileName, setFileName] = useState('');
   const [title, setTitle] = useState('Auto-Generated Paper');
   const [author, setAuthor] = useState('Anonymous');
+  const [selectedSections, setSelectedSections] = useState([...DEFAULT_SECTIONS]); // all selected by default
+  const [selectAll, setSelectAll] = useState(true);
+
   const inputRef = useRef();
 
   const onDrop = (e) => {
@@ -28,6 +42,30 @@ export default function UploadCard({ onSubmit, loading }) {
     setFileName(f.name);
   };
 
+  const toggleSection = (section) => {
+    setSelectedSections((prev) => {
+      if (prev.includes(section)) {
+        const next = prev.filter((s) => s !== section);
+        setSelectAll(next.length === DEFAULT_SECTIONS.length);
+        return next;
+      } else {
+        const next = [...prev, section];
+        setSelectAll(next.length === DEFAULT_SECTIONS.length);
+        return next;
+      }
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectAll) {
+      setSelectedSections([]);
+      setSelectAll(false);
+    } else {
+      setSelectedSections([...DEFAULT_SECTIONS]);
+      setSelectAll(true);
+    }
+  };
+
   const handleSubmit = async () => {
     const f = inputRef.current?.files?.[0];
     if (!f) {
@@ -35,13 +73,17 @@ export default function UploadCard({ onSubmit, loading }) {
       return;
     }
 
+    // Ensure at least one section
+    const sectionsToSend = selectedSections.length ? selectedSections : [...DEFAULT_SECTIONS];
+
     const fd = new FormData();
-    fd.append('file', f);   // ✅ matches backend parameter
+    fd.append('file', f); // matches backend parameter name
     fd.append('title', title);
     fd.append('author', author);
 
     try {
-      await onSubmit(fd);
+      // onSubmit now receives FormData and an array of sections to generate
+      await onSubmit(fd, sectionsToSend);
     } catch (err) {
       console.error('Upload error:', err);
       alert(`Error: ${err.message || 'Failed to generate paper'}`);
@@ -91,6 +133,42 @@ export default function UploadCard({ onSubmit, loading }) {
             className="w-full rounded-lg bg-slate-900/40 border border-slate-700/50 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400/30"
             placeholder="Your name"
           />
+        </div>
+      </div>
+
+      {/* Section Selection */}
+      <div className="mt-6">
+        <label className="block text-sm text-slate-300 mb-2">Choose sections to generate</label>
+        <div className="flex items-center gap-3 mb-3">
+          <button
+            onClick={toggleSelectAll}
+            type="button"
+            className="px-3 py-1 rounded-md bg-slate-800/40 text-sm text-slate-200 border border-slate-700/50 hover:bg-slate-800/60"
+          >
+            {selectAll ? 'Unselect All' : 'Select All'}
+          </button>
+          <span className="text-slate-400 text-sm">{selectedSections.length} selected</span>
+        </div>
+
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+          {DEFAULT_SECTIONS.map((s) => (
+            <label
+              key={s}
+              className={`flex items-center gap-2 p-2 rounded-lg cursor-pointer border ${
+                selectedSections.includes(s)
+                  ? 'border-indigo-500 bg-indigo-600/10 text-white'
+                  : 'border-slate-700/30 text-slate-300'
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={selectedSections.includes(s)}
+                onChange={() => toggleSection(s)}
+                className="w-4 h-4"
+              />
+              <span className="capitalize text-sm">{s}</span>
+            </label>
+          ))}
         </div>
       </div>
 

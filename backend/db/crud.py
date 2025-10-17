@@ -1,5 +1,9 @@
+# backend/db/crud.py
+
+from typing import Optional
 from sqlalchemy.orm import Session
 from . import models, schemas
+
 
 # === User CRUD ===
 def create_user(db: Session, user: schemas.UserCreate):
@@ -24,7 +28,7 @@ def get_user(db: Session, user_id: int):
 
 
 # === Run CRUD ===
-def create_run(db: Session, input_file: str, status: str = "pending", user_id: int | None = None):
+def create_run(db: Session, input_file: str, status: str = "pending", user_id: Optional[int] = None):
     """Create a new run when a notebook/code file is uploaded."""
     db_run = models.Run(
         input_file=input_file,
@@ -37,7 +41,7 @@ def create_run(db: Session, input_file: str, status: str = "pending", user_id: i
     return db_run
 
 
-def update_run_status(db: Session, run_id: int, status: str, output_file: str | None = None):
+def update_run_status(db: Session, run_id: int, status: str, output_file: Optional[str] = None):
     """Update run status and optionally attach output file path."""
     run = db.query(models.Run).filter(models.Run.id == run_id).first()
     if not run:
@@ -55,13 +59,50 @@ def get_run(db: Session, run_id: int):
 
 
 # === Paper CRUD ===
-def add_paper(db: Session, run_id: int, paper: schemas.PaperBase):
-    """Add a discovered paper (CrossRef/arXiv/etc.) linked to a run.
-       Skip insertion if DOI already exists."""
-    if paper.doi:
+def _has_required_paper_fields(paper: schemas.PaperBase) -> bool:
+    """
+    Validate that a PaperBase has the minimum required fields for a
+    proper IEEE-style reference: title, authors, year, venue, doi.
+    Returns True if all present and non-empty; False otherwise.
+    """
+    req = ["title", "authors", "year", "venue", "doi"]
+    for k in req:
+        val = getattr(paper, k, None)
+        if val is None:
+            return False
+        if isinstance(val, str) and not val.strip():
+            return False
+    # simple year sanity check (allow int or string containing digits)
+    year = getattr(paper, "year", None)
+    try:
+        if isinstance(year, str):
+            if not any(ch.isdigit() for ch in year):
+                return False
+        else:
+            int(year)
+    except Exception:
+        return False
+    return True
+
+
+def add_paper(db: Session, run_id: int, paper: schemas.PaperBase) -> Optional[models.Paper]:
+    """
+    Add a discovered paper (CrossRef/arXiv/etc.) linked to a run.
+    - If DOI exists and the DOI is already in DB, returns the existing record.
+    - If the paper does not contain the minimum fields required for an IEEE-style
+      reference (title, authors, year, venue, doi) then insertion is skipped and
+      None is returned.
+    """
+    # If DOI provided and already present, return existing
+    if getattr(paper, "doi", None):
         existing = db.query(models.Paper).filter(models.Paper.doi == paper.doi).first()
         if existing:
             return existing
+
+    # Validate required fields for high-quality references
+    if not _has_required_paper_fields(paper):
+        # Skip inserting incomplete metadata to preserve downstream reference quality
+        return None
 
     db_paper = models.Paper(
         run_id=run_id,
@@ -71,7 +112,7 @@ def add_paper(db: Session, run_id: int, paper: schemas.PaperBase):
         venue=paper.venue,
         doi=paper.doi,
         url=paper.url,
-        pdf_path=paper.pdf_path,
+        pdf_path=getattr(paper, "pdf_path", None),
     )
     db.add(db_paper)
     db.commit()

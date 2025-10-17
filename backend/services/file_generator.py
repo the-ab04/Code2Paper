@@ -1,5 +1,3 @@
-# backend/services/file_generator.py
-
 import io
 from typing import Dict, Union
 from docx import Document
@@ -12,44 +10,64 @@ def render_docx(
 ) -> None:
     """
     Render a DOCX file from structured paper sections.
-    Can write to a file path (str) or to a BytesIO buffer.
-
-    Args:
-        sections: dict with keys like "abstract", "methods", "results", etc.
-        out_file: file path (str) to save, or BytesIO buffer for streaming.
-        title: document title (paper title).
+    Handles missing styles safely and ensures references are properly formatted.
     """
     doc = Document()
 
     # === Title ===
-    if title.strip():
+    if title and title.strip():
         doc.add_heading(title.strip(), level=0)
 
     # === Main Sections ===
-    for key in [
+    ordered_sections = [
         "abstract", "introduction", "methods",
         "experiments", "results", "discussion", "conclusion"
-    ]:
-        content = sections.get(key, "").strip()
-        if content:
-            doc.add_heading(key.capitalize(), level=1)
-            doc.add_paragraph(content)
+    ]
+
+    for key in ordered_sections:
+        content = sections.get(key, "")
+        if not content or not content.strip():
+            continue
+
+        # Add section heading
+        doc.add_heading(key.capitalize(), level=1)
+
+        # Split content by double newlines into paragraphs
+        for para in [p.strip() for p in content.split("\n\n") if p.strip()]:
+            doc.add_paragraph(para)
 
     # === References ===
-    refs = sections.get("references", "").strip()
+    refs = sections.get("references", "")
+    if refs is not None:
+        refs = refs.strip()
+
+    # Always create a References section
+    doc.add_page_break()
+    doc.add_heading("References", level=1)
+
     if refs:
-        doc.add_heading("References", level=1)
-        for ref in refs.split("\n"):
-            if ref.strip():
-                doc.add_paragraph(ref.strip(), style="List Number")
+        for line in refs.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                # Try using numbered list style if available
+                doc.add_paragraph(line, style="List Number")
+            except KeyError:
+                # Fallback if the style doesn't exist in the template
+                doc.add_paragraph(line)
+    else:
+        doc.add_paragraph("No references available.")
 
     # === Save ===
-    if isinstance(out_file, str):
-        # Save to disk
-        doc.save(out_file)
-    elif isinstance(out_file, io.BytesIO):
-        # Save to memory buffer (for StreamingResponse in FastAPI)
-        doc.save(out_file)
-        out_file.seek(0)
-    else:
-        raise TypeError("out_file must be a str (path) or io.BytesIO")
+    try:
+        if isinstance(out_file, str):
+            doc.save(out_file)
+        elif isinstance(out_file, io.BytesIO):
+            doc.save(out_file)
+            out_file.seek(0)
+        else:
+            raise TypeError("out_file must be a str (path) or io.BytesIO")
+    except Exception as e:
+        # Explicitly raise errors for debugging in backend logs
+        raise RuntimeError(f"Error while saving DOCX: {e}")
