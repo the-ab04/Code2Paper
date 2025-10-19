@@ -1,77 +1,69 @@
-import { useState } from 'react';
-import Header from './components/Header';
-import UploadCard from './components/UploadCard';
-import PaperPreview from './components/PaperPreview';
-import { uploadNotebook, generatePaper } from './api/client';
+// src/App.js
+import React, { Suspense, lazy } from "react";
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
+import Header from "./components/Header";
+
+// Lazy-load pages for better initial performance
+const LandingPage = lazy(() => import("./pages/LandingPage"));
+const UploadPage = lazy(() => import("./pages/UploadPage"));
+const SignIn = lazy(() => import("./pages/SignIn"));
+const ResultsPage = lazy(() => import("./pages/ResultsPage")); // optional
+
+// Simple NotFound component
+function NotFound() {
+  return (
+    <div style={{ padding: 40, textAlign: "center" }}>
+      <h2>Page not found</h2>
+      <p>The page you requested doesn't exist.</p>
+      <p>
+        <a href="/">Return to home</a>
+      </p>
+    </div>
+  );
+}
+
+/*
+  HeaderController is a small component that decides whether to show
+  the Header based on the current pathname. Because useLocation()
+  must be used inside a Router, we render this component inside BrowserRouter.
+*/
+function HeaderController() {
+  const location = useLocation();
+
+  // Hide header for these routes (exact or prefix). Add more if needed.
+  const hideOn = ["/signin"];
+  const hideHeader = hideOn.some((p) => location.pathname === p || location.pathname.startsWith(p + "/"));
+
+  return hideHeader ? null : <Header />;
+}
 
 export default function App() {
-  const [loading, setLoading] = useState(false);
-  const [fileUrl, setFileUrl] = useState('');
-
-  /**
-   * onSubmit now receives two args from UploadCard:
-   *  - formData: FormData with the notebook and metadata
-   *  - sections: array of section names the user wants generated
-   */
-  const handleUploadAndGenerate = async (formData, sections = []) => {
-    try {
-      setLoading(true);
-
-      // === Step 1: Upload notebook → backend returns run info ===
-      const uploadRes = await uploadNotebook(formData);
-      if (!uploadRes?.id) {
-        throw new Error('Upload failed: No run_id returned.');
-      }
-      const runId = uploadRes.id;
-
-      // === Step 2: Generate paper → pass selected sections to backend ===
-      // generatePaper should accept (runId, sections)
-      const genRes = await generatePaper(runId, sections);
-
-      if (genRes?.download_url) {
-        const base = process.env.REACT_APP_API_URL || 'http://localhost:8001';
-        setFileUrl(`${base}${genRes.download_url}`);
-      } else {
-        throw new Error('No download URL received from server.');
-      }
-    } catch (e) {
-      console.error('Error in handleUploadAndGenerate:', e);
-      alert('Error: ' + (e?.response?.data?.detail || e.message));
-    } finally {
-      setLoading(false);
-    }
-  };
+  // Optional base path (set REACT_APP_BASE_URL in your .env if needed)
+  const basename = process.env.REACT_APP_BASE_URL || "/";
 
   return (
-    <div className="min-h-screen flex flex-col">
-      {/* === Header === */}
-      <Header />
+    <BrowserRouter basename={basename}>
+      {/* HeaderController decides whether to render the Header for the current route */}
+      <HeaderController />
 
-      {/* === Main Content === */}
-      <main className="flex-grow max-w-6xl mx-auto px-6 pb-20">
-        <section className="mt-6 md:mt-10">
-          <div className="mb-6">
-            <h2 className="text-2xl md:text-3xl font-semibold tracking-tight">
-              Turn Notebooks into Papers
-            </h2>
-            <p className="text-slate-400 mt-2">
-              Upload a <code>.ipynb</code> notebook or script. We’ll parse facts,
-              generate sections with Groq, enrich citations, and export a polished DOCX.
-            </p>
-          </div>
+      {/* Suspense fallback while lazy-loaded pages load */}
+      <Suspense fallback={<div style={{ padding: 24 }}>Loading…</div>}>
+        <Routes>
+          <Route index element={<LandingPage />} />
+          <Route path="/" element={<LandingPage />} />
+          <Route path="/upload" element={<UploadPage />} />
+          <Route path="/signin" element={<SignIn />} />
 
-          {/* === Upload & Generate === */}
-          <UploadCard onSubmit={handleUploadAndGenerate} loading={loading} />
+          {/* optional results page */}
+          <Route path="/results" element={<ResultsPage />} />
 
-          {/* === Download Preview === */}
-          <PaperPreview url={fileUrl} />
-        </section>
-      </main>
+          {/* redirect example */}
+          <Route path="/home" element={<Navigate to="/" replace />} />
 
-      {/* === Footer === */}
-      <footer className="text-center text-xs text-slate-500 py-8">
-        © {new Date().getFullYear()} Code2Paper
-      </footer>
-    </div>
+          {/* 404 */}
+          <Route path="*" element={<NotFound />} />
+        </Routes>
+      </Suspense>
+    </BrowserRouter>
   );
 }

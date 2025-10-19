@@ -180,6 +180,54 @@ def _format_candidate_block(candidate_papers: List[Dict[str, Any]]) -> str:
     return block
 
 
+# === Title sanitization helper ===
+def _sanitize_title(raw_title: str, fallback: str = "") -> str:
+    """
+    Clean up a title produced by the LLM:
+      - remove obvious timestamps/UUID tokens
+      - strip repeated punctuation
+      - trim to a reasonable word length (prefer 8–16 words)
+      - use fallback if result is too short
+    """
+    if not raw_title:
+        return fallback or "Generated Paper"
+
+    t = str(raw_title).strip()
+
+    # Remove fenced code block wrappers if present
+    fence_match = re.match(r"^```(?:\w+)?\s*(.*?)\s*```$", t, flags=re.S)
+    if fence_match:
+        t = fence_match.group(1).strip()
+
+    # Remove UUIDs and hex-like tokens and date-like patterns
+    t = re.sub(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", "", t)
+    t = re.sub(r"\b[0-9a-fA-F]{8,}\b", "", t)
+    t = re.sub(r"\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b", "", t)
+    t = re.sub(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s*\d{1,2}(?:,\s*\d{4})?\b", "", t, flags=re.I)
+
+    # Remove repeated punctuation and extra whitespace
+    t = re.sub(r'[_\-]{2,}', ' ', t)
+    t = re.sub(r'\s{2,}', ' ', t)
+    t = t.strip(" \n\t\"'.,:;")
+
+    # If LLM returned multiple sentences, take the first as title
+    if '.' in t:
+        t = t.split('.')[0]
+
+    # Limit word count (prefer between 8 and 16)
+    words = t.split()
+    if len(words) > 16:
+        t = " ".join(words[:14])
+    # If too short and fallback available, prefer fallback
+    if len(words) < 3 and fallback:
+        t = fallback
+
+    t = t.strip()
+    if not t:
+        return fallback or "Generated Paper"
+    return t
+
+
 # === Main public function ===
 def generate_sections(
     facts: Dict[str, Any],
@@ -292,6 +340,29 @@ def generate_sections(
     # iterate and produce each requested section independently following canonical order
     for section in section_order:
         if section not in requested:
+            continue
+
+        # Special handling for title: stronger prompt + sanitize
+        if section == "title":
+            # stronger title prompt and explicit constraint
+            prompt = (
+                f"{common_context}\n"
+                "Write only a clear, descriptive research paper title (8–16 words) summarizing the main contribution.\n"
+                "Avoid dates, file names, UUIDs, parentheses with dataset names, and do not include citations.\n"
+                "Return only the title text (no punctuation decorations or Markdown headers).\n"
+            )
+            raw_title = _safe_invoke(llm, prompt)
+            # try to derive a fallback title from notebook markdown if available
+            fallback_title = ""
+            if facts.get("markdown"):
+                for md_line in facts.get("markdown", []):
+                    if md_line and isinstance(md_line, str) and len(md_line.strip()) > 10:
+                        # first meaningful markdown line as fallback
+                        fallback_title = md_line.strip().splitlines()[0][:120]
+                        break
+            sanitized = _sanitize_title(raw_title, fallback=fallback_title or "Generated Paper")
+            produced["title"] = sanitized
+            # continue to next section (we've handled title)
             continue
 
         instr = SECTION_INSTRUCTIONS.get(section, "")

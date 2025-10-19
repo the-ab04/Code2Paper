@@ -1,0 +1,431 @@
+/* Complete signin.css (original layout preserved) */
+
+/* reset */
+*, *:before, *:after {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-family: 'Nunito', sans-serif;
+}
+
+body {
+    width: 100%;
+    height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    font-family: 'Nunito', sans-serif;
+    background: #0e0e0e;
+    overflow: hidden;
+    position: relative;
+}
+
+body::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: radial-gradient(circle at 50% 50%, rgba(157, 160, 160, 0.1) 0%, rgba(255, 0, 255, 0.1) 35%, rgba(0, 0, 0, 1) 100%);
+    z-index: 0;
+}
+
+.floating-shapes {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 0;
+    pointer-events: none;
+}
+
+.shape {
+    position: absolute;
+    border-radius: 50%;
+    background: linear-gradient(135deg, rgba(0, 255, 255, 0.2), rgba(255, 0, 255, 0.2));
+    animation: float 6s ease-in-out infinite;
+    filter: blur(1px);
+}
+
+.shape:nth-child(1) {
+    width: 100px;
+    height: 100px;
+    top: 20%;
+    left: 10%;
+    animation-delay: 0s;
+}
+
+.shape:nth-child(2) {
+    width: 150px;
+    height: 150px;
+    top: 60%;
+    right: 15%;
+    animation-delay: -2s;
+}
+
+.shape:nth-child(3) {
+    width: 80px;
+    height: 80px;
+    bottom: 30%;
+    left: 20%;
+    animation-delay: -4s;
+}
+
+.shape:nth-child(4) {
+    width: 120px;
+    height: 120px;
+    top: 10%;
+    right: 30%;
+    animation-delay: -1s;
+}
+
+@keyframes float {
+    0%, 100% { transform: translateY(0px) rotate(0deg); }
+    50% { transform: translateY(-20px) rotate(180deg); }
+}
+
+input, button {
+    border: none;
+    background: none;
+}
+
+.cont {
+    overflow: hidden;
+    position: relative;
+    width: 900px;
+    height: 550px;
+    background: rgba(10, 3, 3, 0.685);
+    backdrop-filter: blur(20px);
+    box-shadow: 0 30px 80px rgba(20, 20, 20, 0.3);
+    border: 1px solid rgba(15, 15, 15, 0.1);
+    border-radius: 15px;
+    z-index: 1;
+}
+
+.form {
+    position: relative;
+    width: 640px;
+    height: 100%;
+    padding: 50px 30px;
+    transition: transform 1.2s ease-in-out;
+}
+
+h2 {
+    width: 100%;
+    font-size: 30px;
+    text-align: center;
+    background: linear-gradient(135deg, #ffffff, #dce0e0);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+label {
+    display: block;
+    width: 260px;
+    margin: 25px auto 0;
+    text-align: center;
+}
+
+label span {
+    font-size: 14px;
+    font-weight: 600;
+    color: #f4f2f8;
+    text-transform: uppercase;
+}
+
+/* Modern glowing input boxes */
+input {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  font-size: 15px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #fff;
+  outline: none;
+  transition: all 0.3s ease;
+  box-shadow: inset 0 0 10px rgba(0, 255, 255, 0.05),
+              0 0 0 rgba(0, 255, 255, 0);
+}
+
+/* When user hovers */
+input:hover {
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 0 12px rgba(0, 255, 255, 0.08),
+              0 0 8px rgba(255, 0, 255, 0.05);
+}
+
+/* When user focuses (typing) */
+input:focus {
+  background: rgba(255, 255, 255, 0.1);
+  box-shadow: 0 0 10px rgba(0, 255, 255, 0.4),
+              0 0 20px rgba(255, 0, 255, 0.3);
+  border: 1px solid rgba(0, 255, 255, 0.4);
+}
+
+/* Optional placeholder text color */
+input::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+
+button {
+    display: block;
+    margin: 0 auto;
+    width: 260px;
+    height: 36px;
+    border-radius: 30px;
+    color: #fff;
+    font-size: 15px;
+    cursor: pointer;
+}
+
+.submit {
+    margin-top: 40px;
+    margin-bottom: 30px;
+    text-transform: uppercase;
+    font-weight: 600;
+    background: rgb(79, 69, 211);
+    transition: .5s;
+    color: #fff;
+    box-shadow: 0 10px 40px rgba(79,69,211,0.14);
+}
+
+.submit:hover {
+    background: #000;
+    color: #fff;
+}
+
+.forgot-pass {
+    margin-top: 15px;
+    text-align: center;
+    font-size: 14px;
+    font-weight: 600;
+    color: #bdb8c4;
+    cursor: pointer;
+}
+
+.forgot-pass:hover {
+    color: rgb(79, 231, 124);
+}
+
+.social-media {
+    width: 100%;
+    text-align: center;
+    margin-top: 20px;
+}
+
+.social-media ul {
+    list-style: none;
+}
+
+.social-media ul li {
+    display: inline-block;
+    cursor: pointer;
+    margin: 25px 10px;
+}
+
+.social-media img {
+    width: 20px;
+    height: 20px;
+}
+
+.sub-cont {
+    overflow: hidden;
+    position: absolute;
+    left: 640px;
+    top: 0;
+    width: 900px;
+    height: 100%;
+    padding-left: 260px;
+    background: #0a0b0b;
+    transition: transform 1.2s ease-in-out;
+}
+
+.cont.s-signup .sub-cont {
+    transform: translate3d(-640px, 0, 0);
+}
+
+.img {
+    overflow: hidden;
+    z-index: 2;
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 260px;
+    height: 100%;
+    padding-top: 360px;
+}
+
+.img:before {
+    content: '';
+    position: absolute;
+    right: 0;
+    top: 0;
+    width: 900px;
+    height: 100%;
+    background-size: cover;
+    transition: transform 1.2s ease-in-out;
+}
+
+.img:after {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(148, 214, 236, 0.12);
+}
+
+.cont.s-signup .img:before {
+    transform: translate3d(640px, 0, 0);
+}
+
+.img-text {
+    z-index: 2;
+    position: absolute;
+    left: 0;
+    top: 50px;
+    width: 100%;
+    padding: 0 20px;
+    text-align: center;
+    color: #fff;
+    transition: transform 1.2s ease-in-out;
+}
+
+.img-text h1 {
+    margin-bottom: 10px;
+    font-weight: normal;
+    color: #d6ccec; /* soft heading color */
+}
+
+.img-text p {
+    font-size: 14px;
+    line-height: 1.5;
+    color: rgba(220,220,230,0.85);
+}
+
+.cont.s-signup .img-text.m-up {
+    transform: translateX(520px);
+}
+
+.img-text.m-in {
+    transform: translateX(-520px);
+}
+
+.cont.s-signup .img-text.m-in {
+    transform: translateX(0);
+}
+
+.sign-in {
+    padding-top: 65px;
+    transition-timing-function: ease-out;
+    transition: opacity 0.6s ease, visibility 0.6s ease;
+    opacity: 1;
+    visibility: visible;
+}
+
+.cont.s-signup .sign-in {
+    transition-timing-function: ease-in-out;
+    transition-duration: 1.2s;
+    transform: translate3d(640px, 0, 0);
+    /* will be hidden by the minimal fix appended below */
+}
+
+.img-btn {
+    overflow: hidden;
+    z-index: 2;
+    position: relative;
+    width: 100px;
+    height: 36px;
+    margin: 0 auto;
+    background: transparent;
+    color: #fff;
+    text-transform: uppercase;
+    font-size: 15px;
+    cursor: pointer;
+}
+
+.img-btn:after {
+    content: '';
+    z-index: 2;
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    border: 2px solid #fff;
+    border-radius: 30px;
+}
+
+.img-btn span {
+    position: absolute;
+    left: 0;
+    top: 0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    width: 100%;
+    height: 100%;
+    transition: transform 1.2s;
+}
+
+.img-btn span.m-in {
+    transform: translateY(-72px);
+}
+
+.cont.s-signup .img-btn span.m-in {
+    transform: translateY(0);
+}
+
+.cont.s-signup .img-btn span.m-up {
+    transform: translateY(72px);
+}
+
+.sign-up {
+    transform: translate3d(-900px, 0, 0);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.6s ease, visibility 0.6s ease;
+}
+
+.cont.s-signup .sign-up {
+    transform: translate3d(0, 0, 0);
+    opacity: 1;
+    visibility: visible;
+}
+
+/* --- MINIMAL OVERLAP FIX (ADDED AT END) ---
+   This small block hides the inactive panel so text doesn't
+   bleed through when panels animate. It doesn't change layout.
+*/
+.sign-up {
+  /* already set above, but reinforce here to be safe */
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.6s ease, visibility 0.6s ease;
+}
+
+.cont.s-signup .sign-in {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.cont.s-signup .sign-up {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+/* keep smooth transitions for both panels */
+.sign-in, .sign-up {
+  transition: opacity 0.6s ease, visibility 0.6s ease;
+}
