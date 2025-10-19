@@ -1,11 +1,18 @@
 # ========================
 # Python (backend)
 # ========================
+# Ignore everything inside these folders
+backend/storage/indexes/*
+backend/storage/papers/*
+backend/storage/uploads/*
+backend/storage/outputs/*
 
-backend/storage/indexes
-backend/storage/papers
-backend/storage/uploads
-backend/storage/outputs
+# But keep the folders themselves (via .gitkeep files)
+!backend/storage/indexes/.gitkeep
+!backend/storage/papers/.gitkeep
+!backend/storage/uploads/.gitkeep
+!backend/storage/outputs/.gitkeep
+
 # Bytecode and cache
 __pycache__/
 *.py[cod]
