@@ -2,6 +2,10 @@
 # Python (backend)
 # ========================
 
+backend/storage/indexes
+backend/storage/papers
+backend/storage/uploads
+backend/storage/outputs
 # Bytecode and cache
 __pycache__/
 *.py[cod]
