@@ -54,17 +54,72 @@ def upload_notebook(file: UploadFile = File(...), db: Session = Depends(get_db))
 
 
 def _normalize_requested_sections(sections: Optional[List[str]]) -> Optional[List[str]]:
-    """Normalize client provided sections to canonical lowercase names or return None if not provided."""
+    """
+    Normalize client provided sections to canonical lowercase names or return None if not provided.
+    Accepts common synonyms (e.g. 'methodology' -> 'methods', 'literature-review' -> 'literature_review').
+    """
     if not sections:
         return None
-    canonical = {"title", "abstract", "introduction", "methods", "experiments", "results", "discussion", "conclusion", "references"}
-    out = []
+
+    # canonical names supported by backend/LLM
+    canonical = {
+        "title",
+        "abstract",
+        "introduction",
+        "methods",
+        "experiments",
+        "results",
+        "conclusion",
+        "references",
+        "literature_review",
+    }
+
+    # synonyms mapping (lowecase keys)
+    synonyms = {
+        "methodology": "methods",
+        "method": "methods",
+        "literature-review": "literature_review",
+        "literature review": "literature_review",
+        "literaturereview": "literature_review",
+        "lit_review": "literature_review",
+        "litreview": "literature_review",
+        "literature_review": "literature_review",
+        "refs": "references",
+        "ref": "references",
+        "intro": "introduction",
+        "results": "results",
+        "experiment": "experiments",
+    }
+
+    out: List[str] = []
     for s in sections:
         if not s:
             continue
-        s_norm = str(s).strip().lower()
-        if s_norm in canonical:
-            out.append(s_norm)
+        s_raw = str(s).strip()
+        # normalize separators: spaces and hyphens -> underscore, lowercased
+        s_norm = s_raw.lower().replace("-", " ").replace("_", " ").strip()
+        # compress multiple spaces
+        s_norm = re.sub(r"\s+", " ", s_norm)
+
+        # prefer synonyms first
+        if s_norm in synonyms:
+            cand = synonyms[s_norm]
+            if cand in canonical:
+                out.append(cand)
+            continue
+
+        # canonical check: try direct collapse to underscore form (title-case in mapping uses underscores)
+        s_key = s_norm.replace(" ", "_")
+        if s_key in canonical:
+            out.append(s_key)
+            continue
+
+        # try again raw exact (fallback)
+        if s_raw.lower() in canonical:
+            out.append(s_raw.lower())
+            continue
+
+    # return None if empty so LLM uses default full set
     return out or None
 
 
@@ -121,7 +176,7 @@ def generate_paper(
     external_papers: List[Dict[str, Any]] = []
     if payload.use_rag:
         try:
-            persisted = find_and_persist_papers(queries, run.id, db, max_results=5)
+            persisted = find_and_persist_papers(queries, run.id, db, max_results=15)
             external_papers = persisted or []
             print(f"✅ Persisted and indexed {len(external_papers)} external papers for run {run.id}")
         except Exception as e:

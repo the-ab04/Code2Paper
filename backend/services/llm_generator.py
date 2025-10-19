@@ -31,6 +31,12 @@ SECTION_INSTRUCTIONS = {
         "contributions of this work in bullet-like sentences (but keep the output as a coherent paragraph(s)). "
         "Insert citation placeholders as [CITATION: query] when referencing prior work. Prefer DOIs if known."
     ),
+    "literature_review": (
+        "Write a Literature Review section that summarizes prior work related to the task. "
+        "Group related works by theme or approach, compare representative methods/benchmarks, and highlight gaps "
+        "that motivate the present work. Use citation placeholders in the format [CITATION: query] for specific "
+        "papers (prefer DOIs if available). Aim for a coherent synthesis rather than a long list of individual papers."
+    ),
     "methods": (
         "Write a Methods section describing the model/architecture, datasets, training, hyperparameters, and any "
         "implementation details necessary to reproduce the work. Use citation placeholders [CITATION: query] where "
@@ -42,15 +48,11 @@ SECTION_INSTRUCTIONS = {
     ),
     "results": (
         "Write a Results section summarizing quantitative and qualitative findings, include key tables/metrics "
-        "phrases (no raw tables), and mention notable observations. Use citation placeholders where referencing "
-        "benchmarks or prior reported numbers. Prefer DOIs if known."
+        "phrases (no raw tables), and mention notable observations. Do NOT include citation placeholders in the abstract; omit them if present."
     ),
-    "discussion": (
-        "Write a Discussion: interpret results, discuss strengths and weaknesses, possible causes of behavior, "
-        "and practical implications. Use citation placeholders as needed. Prefer DOIs if known."
-    ),
+
     "conclusion": (
-        "Write a short Conclusion (2–4 sentences) summarizing the work and listing future directions."
+        "Write a short Conclusion (2–4 sentences) summarizing the work and listing future directions.Do NOT include citation placeholders in the abstract; omit them if present."
     ),
     # 'references' is handled separately and must return valid JSON array
     "references": (
@@ -83,7 +85,6 @@ def _safe_invoke(llm, prompt: str) -> str:
             raw = raw.decode("utf-8", errors="ignore")
         return str(raw)
     except Exception as e:
-        # Provide a clear error for upstream handling (e.g., rate limit)
         raise RuntimeError(f"LLM invocation failed: {e}")
 
 
@@ -261,8 +262,8 @@ def generate_sections(
 
     # Allowed order and canonical section names
     section_order = [
-        "title", "abstract", "introduction", "methods",
-        "experiments", "results", "discussion", "conclusion", "references"
+        "title", "abstract", "introduction", "literature_review", "methods",
+        "experiments", "results", "conclusion", "references"
     ]
 
     # Normalize requested sections if provided; otherwise generate all
@@ -275,6 +276,8 @@ def generate_sections(
             if not s:
                 continue
             key = str(s).strip().lower()
+            if key in {"literature-review", "literature_review", "literaturereview"}:
+                key = "literature_review"
             if key in lower_to_canon:
                 requested.append(lower_to_canon[key])
         if not requested:
@@ -344,7 +347,6 @@ def generate_sections(
 
         # Special handling for title: stronger prompt + sanitize
         if section == "title":
-            # stronger title prompt and explicit constraint
             prompt = (
                 f"{common_context}\n"
                 "Write only a clear, descriptive research paper title (8–16 words) summarizing the main contribution.\n"
@@ -352,23 +354,20 @@ def generate_sections(
                 "Return only the title text (no punctuation decorations or Markdown headers).\n"
             )
             raw_title = _safe_invoke(llm, prompt)
-            # try to derive a fallback title from notebook markdown if available
             fallback_title = ""
             if facts.get("markdown"):
                 for md_line in facts.get("markdown", []):
                     if md_line and isinstance(md_line, str) and len(md_line.strip()) > 10:
-                        # first meaningful markdown line as fallback
                         fallback_title = md_line.strip().splitlines()[0][:120]
                         break
             sanitized = _sanitize_title(raw_title, fallback=fallback_title or "Generated Paper")
             produced["title"] = sanitized
-            # continue to next section (we've handled title)
+            print(f"[LLM] Produced title: {sanitized!r}")
             continue
 
         instr = SECTION_INSTRUCTIONS.get(section, "")
 
         if section == "references":
-            # ask explicitly for JSON array
             prompt = (
                 f"{common_context}\n"
                 f"Now produce ONLY a JSON array (no other text) where each element is a short citation query "
@@ -385,7 +384,6 @@ def generate_sections(
                     token = r.strip()
                     if not token:
                         continue
-                    # remove surrounding [CITATION: ...] if present
                     m = re.match(r"^\[CITATION:\s*(.+?)\]$", token, flags=re.I)
                     if m:
                         token = m.group(1).strip()
@@ -395,21 +393,18 @@ def generate_sections(
                     if doi_norm and doi_norm in candidate_doi_map:
                         matched = candidate_doi_map[doi_norm]
                     else:
-                        # try title partial match
                         token_norm = _normalize_title_for_match(token)
                         for t_norm, p in candidate_title_map:
                             if token_norm in t_norm or t_norm in token_norm:
                                 matched = p
                                 break
                     if matched:
-                        # prefer DOI when available; else prefer canonical title from candidate record
                         use = (matched.get("doi") or matched.get("title") or token).strip()
                         final_refs.append(use)
                     else:
-                        # skip any external refs not in candidate list
+                        # skip external refs not in candidate list
                         continue
             else:
-                # accept whatever parsed
                 final_refs = [r.strip() for r in refs_list if r and r.strip()]
 
             # wrap to canonical placeholders
@@ -423,8 +418,9 @@ def generate_sections(
                     placeholder_lines.append(f"[CITATION: {item}]")
 
             produced["references"] = "\n".join(placeholder_lines)
+            print(f"[LLM] Produced references placeholders: {produced['references'][:200]}")
         else:
-            # textual section
+            # textual section (including literature_review)
             extra = ""
             if rag_context:
                 extra = (
@@ -436,13 +432,16 @@ def generate_sections(
                     "You MUST only cite papers from the 'Candidate Papers' list above. Use DOI if present; otherwise use the title exactly as shown."
                 )
 
+            # For literature_review we can add an explicit guidance about length / synthesis
+            section_label = section.replace('_', ' ').title()
             prompt = (
                 f"{common_context}\n"
-                f"Write the {section.upper()} section.\n"
+                f"Write the {section_label} section.\n"
                 f"{instr}\n\n"
                 f"{extra}\n\n"
                 "Return only the section text (no surrounding JSON or markdown fences)."
             )
+
             raw = _safe_invoke(llm, prompt)
             text = str(raw).strip()
 
@@ -456,7 +455,20 @@ def generate_sections(
                 text = _remove_citation_placeholders(text).strip()
                 text = re.sub(r"\s{2,}", " ", text)
                 text = re.sub(r"\s+([.,;:])", r"\1", text)
+                
+            # Remove citation placeholders from results and conclusion explicitly
+            if section in ("results", "conclusion"):
+                # remove both placeholder tokens and any stray numeric [CITATION: ...]
+                text = _remove_citation_placeholders(text).strip()
+                # Optional: also remove leftover bracketed forms like [CITATION: ...] variants
+                text = re.sub(r"\[CITATION:[^\]]+\]", "", text, flags=re.I)
+                # tidy whitespace/punctuation
+                text = re.sub(r"\s{2,}", " ", text)
+                text = re.sub(r"\s+([.,;:])", r"\1", text)
 
             produced[section] = text
+            # lightweight debug log (first 150 chars)
+            preview = (text[:200] + '...') if len(text) > 200 else text
+            print(f"[LLM] Produced {section}: {preview!r}")
 
     return produced

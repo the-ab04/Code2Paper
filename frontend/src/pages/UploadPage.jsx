@@ -1,14 +1,15 @@
 // src/pages/UploadPage.jsx
 import React, { useRef, useState, useEffect } from "react";
 import "../styles/Uploadpage.css";
-import api, { uploadNotebook } from "../api/client"; // your existing axios client + helper
+import api, { uploadNotebook } from "../api/client"; // axios client + helper
 
 export default function UploadPage() {
   const uploadSectionRef = useRef(null);
   const fileInputRef = useRef(null);
+  const progressTimerRef = useRef(null);
 
   const [uploadedFile, setUploadedFile] = useState(null);
-  const [runId, setRunId] = useState(null); // store run id returned by upload
+  const [runId, setRunId] = useState(null); // id returned by upload
   const [selectedSections, setSelectedSections] = useState(new Set());
   const [progress, setProgress] = useState(0); // 0..100
   const [generating, setGenerating] = useState(false);
@@ -17,9 +18,9 @@ export default function UploadPage() {
   const frontendSections = [
     "abstract",
     "introduction",
+    "literature_review", // NEW: literature review
     "methodology", // maps to backend 'methods'
     "results",
-    "discussion",
     "conclusion",
     "references",
   ];
@@ -27,9 +28,9 @@ export default function UploadPage() {
   const canonicalMap = {
     abstract: "abstract",
     introduction: "introduction",
+    literature_review: "literature_review", // make sure backend accepts this
     methodology: "methods",
     results: "results",
-    discussion: "discussion",
     conclusion: "conclusion",
     references: "references",
   };
@@ -89,6 +90,7 @@ export default function UploadPage() {
       setStatusText(`Selected: ${file.name}`);
       // Clear prior runId since new upload will create a new run
       setRunId(null);
+      setProgress(0);
     } catch (err) {
       console.error("Failed to read file:", err);
       alert("There was an error reading the file. Try again.");
@@ -123,6 +125,28 @@ export default function UploadPage() {
     });
   }
 
+  // Smoothly increment progress while waiting for long tasks
+  function startProgressAnimation(target = 85) {
+    // Clear existing
+    clearInterval(progressTimerRef.current);
+    progressTimerRef.current = setInterval(() => {
+      setProgress((p) => {
+        // slowly approach target (but don't reach 100 here)
+        if (p < target) {
+          const delta = Math.max(1, Math.floor((target - p) / 12));
+          return Math.min(target, p + delta);
+        }
+        return p;
+      });
+    }, 600); // every 600ms
+  }
+
+  function stopProgressAnimation(final = 100) {
+    clearInterval(progressTimerRef.current);
+    progressTimerRef.current = null;
+    setProgress(final);
+  }
+
   async function generatePaper() {
     if (!uploadedFile) {
       alert("Please upload a .ipynb file first!");
@@ -133,44 +157,48 @@ export default function UploadPage() {
       return;
     }
 
-    // Map to backend canonical names and dedupe
+    // Map to backend canonical names and dedupe (exclude "combined" if present)
     const sectionsList = Array.from(selectedSections)
+      .filter((s) => s !== "combined")
       .map((s) => canonicalMap[s])
       .filter(Boolean);
 
     setGenerating(true);
-    setProgress(5);
+    setProgress(3);
     setStatusText("Uploading notebook...");
+
+    // Start a progress animation during upload/generation
+    startProgressAnimation(40);
 
     try {
       // Step A: Upload notebook -> create a run
       const fd = new FormData();
       fd.append("file", uploadedFile);
 
-      const uploadRes = await uploadNotebook(fd); // helper uses /api/paper/upload
+      // If your uploadNotebook helper supports onUploadProgress, you can pass it.
+      // Here we just call uploadNotebook (which uses axios internally).
+      const uploadRes = await uploadNotebook(fd);
       if (!uploadRes?.id) throw new Error("Upload failed: no run id returned");
       const newRunId = uploadRes.id;
       setRunId(newRunId);
-      setProgress(25);
-      setStatusText("Notebook uploaded. Requesting generation...");
 
-      // Step B: Trigger generation. Backend expects JSON body { sections, use_rag } (adjust as needed)
+      setStatusText("Notebook uploaded. Requesting generation...");
+      // bump progress a bit
+      setProgress((p) => Math.max(p, 30));
+      // continue animated progress
+      startProgressAnimation(70);
+
+      // Step B: Trigger generation. Backend expects JSON body { sections, use_rag }.
       const body = { sections: sectionsList, use_rag: true };
-      // Allow longer timeout for generation (adjust as your system needs)
       const genResp = await api.post(`/api/paper/generate/${newRunId}`, body, {
-        timeout: 300000, // e.g., 5 minutes
+        timeout: 300000, // may take several minutes
       });
+
       const genData = genResp?.data;
-      setProgress(60);
       setStatusText("Server finished generation. Preparing download...");
 
-      // Step C: Determine download URL. Prefer returned download_url, else fall back to endpoint
-      let downloadUrl = null;
-      if (genData?.download_url) {
-        downloadUrl = genData.download_url;
-      } else {
-        downloadUrl = `/api/paper/download/${newRunId}`;
-      }
+      // Step C: Determine download URL
+      let downloadUrl = genData?.download_url || `/api/paper/download/${newRunId}`;
 
       // Step D: Download the file (blob)
       const dlResp = await api.get(downloadUrl, {
@@ -178,13 +206,12 @@ export default function UploadPage() {
         timeout: 300000,
       });
 
-      // Build blob & filename
+      // Extract filename
       const contentType =
         dlResp.headers["content-type"] ||
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
       const blob = new Blob([dlResp.data], { type: contentType });
 
-      // Try to extract filename from Content-Disposition header
       let filename = `generated_paper_${newRunId}.docx`;
       const cd = dlResp.headers["content-disposition"];
       if (cd) {
@@ -198,6 +225,9 @@ export default function UploadPage() {
         }
       }
 
+      // Stop animation and move to near-complete
+      stopProgressAnimation(95);
+
       // Trigger browser download
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -208,30 +238,30 @@ export default function UploadPage() {
       a.remove();
       URL.revokeObjectURL(url);
 
-      setProgress(100);
+      // finalize
+      stopProgressAnimation(100);
       setStatusText("✅ Paper generated and downloaded");
     } catch (err) {
       console.error("Generate error:", err);
-      // Attempt to obtain server message if axios error
+      // show server error if available
       let msg = err?.message || "Generation failed";
       if (err?.response?.data) {
         msg = err.response.data.detail || JSON.stringify(err.response.data) || msg;
       }
       setStatusText("Error: " + msg);
       alert("Error during generation: " + msg);
-      setProgress(0);
+      stopProgressAnimation(0);
     } finally {
       setGenerating(false);
     }
   }
 
   // Download an already-generated paper for the stored runId (if present).
-  // If runId is not set, we try to fetch the latest run as fallback (best-effort).
   async function downloadPaper() {
     try {
       let targetRunId = runId;
       if (!targetRunId) {
-        // Attempt to find last run from backend as a fallback
+        // fallback: query runs and pick last
         const runsRes = await api.get("/api/paper/runs");
         const runs = runsRes?.data || [];
         if (!runs.length) {
@@ -243,6 +273,7 @@ export default function UploadPage() {
 
       setStatusText("⬇️ Downloading generated paper...");
       setGenerating(true);
+      startProgressAnimation(40);
 
       const dlResp = await api.get(`/api/paper/download/${targetRunId}`, {
         responseType: "blob",
@@ -276,6 +307,7 @@ export default function UploadPage() {
       a.remove();
       URL.revokeObjectURL(url);
 
+      stopProgressAnimation(100);
       setStatusText("✅ Download complete");
     } catch (err) {
       console.error("Download error:", err);
@@ -285,6 +317,7 @@ export default function UploadPage() {
       }
       setStatusText("Error: " + msg);
       alert("Error downloading paper: " + msg);
+      stopProgressAnimation(0);
     } finally {
       setGenerating(false);
     }
@@ -362,6 +395,8 @@ export default function UploadPage() {
                   ? "📋 Abstract"
                   : s === "introduction"
                   ? "📖 Introduction"
+                  : s === "literature_review"
+                  ? "📚 Literature Review"
                   : s === "methodology"
                   ? "🔬 Methodology"
                   : s === "results"
@@ -406,8 +441,12 @@ export default function UploadPage() {
             </button>
           </div>
 
-          <div className={`progress-section ${generating || progress >= 100 ? "active" : ""}`} id="progressSection">
-            <div className="progress-bar">
+          <div
+            className={`progress-section ${generating || progress >= 100 ? "active" : ""}`}
+            id="progressSection"
+            aria-live="polite"
+          >
+            <div className="progress-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
               <div className="progress-fill" id="progressFill" style={{ width: `${progress}%` }} />
             </div>
             <p className="progress-text" id="progressText">
