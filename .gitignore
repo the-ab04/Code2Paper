@@ -37,7 +37,8 @@ env/
 *.env.*
 *.env.local
 .env.docker
-
+# But keep the example template
+!.env.example
 # Logs and debug files
 *.log
 logs/
