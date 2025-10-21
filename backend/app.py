@@ -3,10 +3,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # Local imports
-from config import ALLOWED_ORIGINS
+from config import ALLOWED_ORIGINS, PORT
 from routes.paper_routes import router as paper_router
 from routes.user_routes import router as user_router
 from db.init_db import init_db
+import uvicorn
 
 # --- Initialize App ---
 app = FastAPI(
@@ -46,3 +47,6 @@ def root():
 # so no need to duplicate them here.
 app.include_router(paper_router)
 app.include_router(user_router)
+
+if __name__=="__main__":
+    uvicorn.run(("app:app", host="127.0.0.1", port=PORT, reload=True)
