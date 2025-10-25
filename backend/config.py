@@ -1,19 +1,45 @@
+# backend/config.py
 from dotenv import load_dotenv
 import os
 
-load_dotenv()  # loads .env if present
+# Load .env file into environment (no error if .env absent)
+load_dotenv()
 
 # -------------------------------------------------------------------
-# 🔹 LLM Provider
+# 🔹 LLM Provider & Model settings
 # -------------------------------------------------------------------
 LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "groq").strip().lower()
 
-# API Keys
+# API Keys (keep these secret and configure in environment or CI secrets)
 GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
-# OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+# Optional: keep for future use if you use OpenAI or other providers
+OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 
-# Model
+# Model and inference parameters
 MODEL_NAME: str = os.getenv("MODEL_NAME", "llama-3.3-70b-versatile")
+MODEL_TEMPERATURE: float = float(os.getenv("MODEL_TEMPERATURE", "0.15"))
+TOP_K: int = int(os.getenv("TOP_K", "5"))
+
+# -------------------------------------------------------------------
+# 🔹 Embedding & Retriever configuration
+# -------------------------------------------------------------------
+# SentenceTransformers embedding model (used in rag_retriever)
+EMBED_MODEL: str = os.getenv(
+    "EMBED_MODEL",
+    "krlvi/sentence-t5-base-nlpl-code_search_net"
+)
+
+# Qdrant connection can be defined via URL/API key or host/port
+QDRANT_URL: str = os.getenv("QDRANT_URL", os.getenv("QDRANT_HOST", "http://localhost:6333"))
+QDRANT_API_KEY: str = os.getenv("QDRANT_API_KEY", "")
+QDRANT_COLLECTION: str = os.getenv("QDRANT_COLLECTION", "code2paper_chunks")
+
+# Upsert batch size for embeddings (embedding / upsert batching)
+BATCH_UPSERT_SIZE: int = int(os.getenv("QDRANT_UPSERT_BATCH", os.getenv("BATCH_UPSERT_SIZE", "128")))
+
+# Score threshold for retrieval filtering (tuneable)
+RETRIEVAL_SCORE_THRESHOLD: float = float(os.getenv("RETRIEVAL_SCORE_THRESHOLD", "0.20"))
+
 # -------------------------------------------------------------------
 # 🔹 Server
 # -------------------------------------------------------------------
@@ -39,21 +65,26 @@ DATABASE_URL = (
 )
 
 # -------------------------------------------------------------------
-# 🔹 Qdrant Vector Database
+# 🔹 Unpaywall (Open Access lookup)
 # -------------------------------------------------------------------
-QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
-QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
-QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "paper_chunks")
+UNPAYWALL_EMAIL: str = os.getenv("UNPAYWALL_EMAIL", "")  # required by Unpaywall API to be polite
 
 # -------------------------------------------------------------------
-# 🔹 File Storage Paths
+# 🔹 File Storage Paths (used by various modules)
 # -------------------------------------------------------------------
-STORAGE_DIR = os.getenv("STORAGE_DIR", "backend/storage")
+# You might prefer 'storage' at root (matches many service files using 'storage/...')
+STORAGE_DIR = os.getenv("STORAGE_DIR", "storage")
 PAPERS_DIR = os.path.join(STORAGE_DIR, "papers")   # Downloaded PDFs
 OUTPUTS_DIR = os.path.join(STORAGE_DIR, "outputs") # Generated DOCX/PDF
-INDEX_DIR = os.path.join(STORAGE_DIR, "indexes")   # FAISS/Qdrant indexes
+INDEX_DIR = os.path.join(STORAGE_DIR, "indexes")   # FAISS/Qdrant index files (optional)
 
-# Ensure storage dirs exist
+# Ensure storage dirs exist at runtime
 os.makedirs(PAPERS_DIR, exist_ok=True)
 os.makedirs(OUTPUTS_DIR, exist_ok=True)
 os.makedirs(INDEX_DIR, exist_ok=True)
+
+# -------------------------------------------------------------------
+# 🔹 Misc / Safety
+# -------------------------------------------------------------------
+# Use lower-level debug toggles as needed
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()

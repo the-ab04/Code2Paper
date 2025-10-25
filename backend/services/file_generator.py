@@ -30,7 +30,7 @@ def render_docx(
     # === Main Sections ===
     ordered_sections = [
         "abstract", "introduction", "literature_review", "methods",
-        "experiments", "results", "discussion", "conclusion"
+        "experiments", "results", "conclusion"
     ]
 
     def pretty_heading(key: str) -> str:

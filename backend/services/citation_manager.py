@@ -4,8 +4,11 @@ import re
 from typing import Dict, List, Any, Optional
 from sqlalchemy.orm import Session
 from db import crud, schemas
+import requests
 
 CITATION_PATTERN = re.compile(r"\[CITATION:\s*([^\]]+)\]", re.I)
+CROSSREF_API = "https://api.crossref.org/works"
+DEFAULT_HEADERS = {"User-Agent": "Code2Paper/1.0 (mailto:your-real-email@example.com)"}
 
 
 def _safe_str(val: Any) -> str:
@@ -22,57 +25,169 @@ def _normalize_doi_like(token: str) -> str:
     tok = token.strip()
     tok = re.sub(r"^https?://(dx\.)?doi\.org/", "", tok, flags=re.I)
     tok = re.sub(r"^doi:\s*", "", tok, flags=re.I)
+    tok = re.sub(r"\s+", "", tok)
     return tok.lower()
 
 
-def _find_paper(db: Session, query: str) -> Optional[Any]:
+def _crossref_lookup(query: str) -> Optional[Dict[str, Any]]:
+    """
+    Quick CrossRef lookup for a query. Returns the first matching item's normalized metadata
+    (title, authors, year, doi, url, container-title) if found, else None.
+    This is a lightweight fallback used when no local DB match exists.
+    """
+    if not query or not str(query).strip():
+        return None
+    try:
+        resp = requests.get(
+            CROSSREF_API,
+            params={"query": query, "rows": 1},
+            headers=DEFAULT_HEADERS,
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            return None
+        msg = resp.json().get("message", {})
+        items = msg.get("items", []) or []
+        if not items:
+            return None
+        item = items[0]
+        title = item.get("title", [""])[0] if item.get("title") else ""
+        authors_list = item.get("author", []) or []
+        authors = ", ".join(
+            f"{a.get('given','').strip()} {a.get('family','').strip()}".strip()
+            for a in authors_list
+            if a.get("family") or a.get("given")
+        ) or None
+        year = item.get("issued", {}).get("date-parts", [[None]])[0][0]
+        container = item.get("container-title", [""])[0] if item.get("container-title") else ""
+        doi = item.get("DOI")
+        url = item.get("URL")
+        return {
+            "title": title,
+            "authors": authors,
+            "year": year,
+            "venue": container,
+            "doi": doi,
+            "url": url,
+            "source": "crossref",
+        }
+    except Exception:
+        return None
+
+
+def _find_paper(db: Session, query: str, run_id: Optional[int] = None) -> Optional[Any]:
     """
     Try to find a local Paper by:
       1) DOI exact match (normalized)
-      2) title partial match (case-insensitive)
-      3) URL or other fuzzy fallback (not implemented)
+      2) title partial match (case-insensitive, tokenized)
+      3) CrossRef fallback: if CrossRef yields a DOI/title, try to find it in DB;
+         if not present and `run_id` provided, persist a new Paper row using CrossRef metadata
+         (so downstream citation resolution can proceed).
+
     Returns Paper ORM object or None.
     """
     if not query:
         return None
     q = query.strip()
 
-    # Try DOI exact match using normalization
+    # 1) Try DOI exact match using normalization
     doi_norm = _normalize_doi_like(q)
-    if doi_norm:
-        try:
-            # compare normalized DOIs stored in DB (we assume stored DOI is raw; compare lowercased)
-            paper = db.query(crud.models.Paper).filter(crud.models.Paper.doi.ilike(doi_norm)).first()
+    try:
+        if doi_norm:
+            # prefer exact match (case-insensitive)
+            try:
+                paper = (
+                    db.query(crud.models.Paper)
+                    .filter(crud.models.Paper.doi.isnot(None))
+                    .filter(crud.models.Paper.doi.ilike(f"%{doi_norm}%"))
+                    .first()
+                )
+            except Exception:
+                paper = db.query(crud.models.Paper).filter(crud.models.Paper.doi == q).first()
             if paper:
                 return paper
-        except Exception:
-            # fallback: direct equality
+    except Exception:
+        # continue to next strategy on any DB error
+        pass
+
+    # 2) Try title partial match (case-insensitive)
+    try:
+        # Use simple containment match first
+        paper = db.query(crud.models.Paper).filter(crud.models.Paper.title.ilike(f"%{q}%")).first()
+        if paper:
+            return paper
+
+        # If direct containment fails, try tokenized matching (split into words and require at least one)
+        tokens = [t.strip() for t in re.split(r"\W+", q) if t.strip()]
+        if tokens:
+            # build a simple OR-based ilike filter using SQL text (fallback) — keep simple and safe
+            for tok in tokens[:6]:  # limit tokens to reduce query complexity
+                paper = db.query(crud.models.Paper).filter(crud.models.Paper.title.ilike(f"%{tok}%")).first()
+                if paper:
+                    return paper
+    except Exception:
+        pass
+
+    # 3) CrossRef fallback: try to fetch metadata and match/persist
+    try:
+        cr = _crossref_lookup(q)
+        if cr and cr.get("doi"):
+            doi_cr = _normalize_doi_like(cr.get("doi"))
+            # try to find by DOI again (stricter)
             try:
-                paper = db.query(crud.models.Paper).filter(crud.models.Paper.doi == q).first()
+                paper = (
+                    db.query(crud.models.Paper)
+                    .filter(crud.models.Paper.doi.isnot(None))
+                    .filter(crud.models.Paper.doi.ilike(f"%{doi_cr}%"))
+                    .first()
+                )
                 if paper:
                     return paper
             except Exception:
                 pass
 
-    # Try title partial match (case-insensitive)
-    try:
-        paper = db.query(crud.models.Paper).filter(crud.models.Paper.title.ilike(f"%{q}%")).first()
-        if paper:
-            return paper
+            # if not found, optionally create a new Paper record if run_id provided
+            if run_id:
+                try:
+                    paper_base = schemas.PaperBase(
+                        title=cr.get("title") or "Untitled",
+                        authors=cr.get("authors"),
+                        year=int(cr.get("year")) if cr.get("year") else None,
+                        venue=cr.get("venue"),
+                        doi=cr.get("doi"),
+                        url=cr.get("url"),
+                        pdf_path=None,
+                    )
+                    new_paper = crud.add_paper(db, run_id, paper_base)
+                    return db.query(crud.models.Paper).filter(crud.models.Paper.id == new_paper.id).first()
+                except Exception:
+                    # if persisting fails, just continue
+                    pass
+        else:
+            # If CrossRef returned no DOI but a title, try to match by returned title
+            if cr and cr.get("title"):
+                try:
+                    paper = db.query(crud.models.Paper).filter(crud.models.Paper.title.ilike(f"%{cr.get('title')}%")).first()
+                    if paper:
+                        return paper
+                except Exception:
+                    pass
     except Exception:
         pass
 
-    # No match
+    # No match found
     return None
 
 
 def _ensure_citation_row(db: Session, run_id: int, paper_id: int, context: str) -> Any:
     """
     Ensure a Citation row exists linking the run and the paper.
-    Returns the db citation object.
+    Returns the db citation object or None on failure.
     """
+    if not run_id or not paper_id:
+        return None
     try:
-        # Try to find an existing citation row for same run & paper & context (or any)
+        # try to find existing citation for this run & paper
         c = (
             db.query(crud.models.Citation)
             .filter(crud.models.Citation.run_id == run_id)
@@ -81,15 +196,15 @@ def _ensure_citation_row(db: Session, run_id: int, paper_id: int, context: str) 
         )
         if c:
             return c
-        # Create via crud helper if available (crud.add_citation should return the ORM instance)
+        # create one
         new_cite = crud.add_citation(db, run_id, paper_id, schemas.CitationBase(context=context, index=0))
         return new_cite
-    except Exception:
-        # fallback: attempt low-level insert via crud helper if it raises
+    except Exception as e:
+        # fallback attempt
         try:
             new_cite = crud.add_citation(db, run_id, paper_id, schemas.CitationBase(context=context, index=0))
             return new_cite
-        except Exception as e:
+        except Exception:
             print(f"[Citation] Failed to ensure citation row for paper_id={paper_id}: {e}")
             return None
 
@@ -97,11 +212,6 @@ def _ensure_citation_row(db: Session, run_id: int, paper_id: int, context: str) 
 def _format_reference_any(paper: Any, index: int) -> str:
     """
     Format a reference line including any available fields.
-    Example outputs (flexible):
-      [1] J. Doe, "Title of Paper," Conference XYZ, 2021. DOI: 10.xxxx/abcd
-      [2] Unknown Author, "Untitled," 2019. DOI: ...
-      [3] J. Smith, "Some Title,"
-    We include only fields that exist; missing bits are skipped but we always produce a line.
     """
     if not paper:
         return f"[{index}] (Unknown reference)"
@@ -115,30 +225,19 @@ def _format_reference_any(paper: Any, index: int) -> str:
     doi = _safe_str(getattr(paper, "doi", None))
     url = _safe_str(getattr(paper, "url", None))
 
-    # authors
     if authors:
         parts.append(authors)
-    else:
-        # do not force authors, but we can show 'Unknown Author' if nothing else
-        pass
 
-    # title (prefer to wrap in quotes)
     if title:
         parts.append(f"\"{title},\"")
-    else:
-        # If no title, maybe show DOI or url as short identifier later
-        pass
 
-    # venue/year
     if venue:
         parts.append(venue)
     if year:
         parts.append(year)
 
-    # assemble main portion
     main = ", ".join(parts).strip()
     if not main:
-        # fallback minimal identification: DOI or title or URL or 'Unknown'
         if doi:
             main = f"DOI: {doi}"
         elif title:
@@ -148,9 +247,7 @@ def _format_reference_any(paper: Any, index: int) -> str:
         else:
             main = "Unknown reference"
 
-    # append DOI if present and not already included
     if doi:
-        # avoid repeating DOI if main already contains DOI text
         if "doi" not in main.lower():
             return f"[{index}] {main}. DOI: {doi}"
         else:
@@ -161,14 +258,9 @@ def _format_reference_any(paper: Any, index: int) -> str:
 
 def enrich_references(sections: Dict[str, str], run_id: int, db: Session) -> Dict[str, str]:
     """
-    Resolve [CITATION: query] placeholders using only local DB papers.
-    For any resolved paper we will:
-      - create or reuse a Citation row (index will be assigned deterministically)
-      - replace placeholders with numeric [n]
-      - build 'references' using any available fields from the Paper row
-
-    If a placeholder cannot be resolved to a local Paper, it remains unchanged and is listed in
-    sections['_unresolved_placeholders'] for debugging.
+    Resolve [CITATION: query] placeholders using local DB papers, with CrossRef fallback when helpful.
+    Replaces placeholders with numeric references for resolved items, persists citation rows when needed,
+    and builds a deterministic References section (ordered by assigned index).
     """
     # 1) collect unique placeholders in order
     unique_queries: List[str] = []
@@ -180,80 +272,79 @@ def enrich_references(sections: Dict[str, str], run_id: int, db: Session) -> Dic
             if q and q not in unique_queries:
                 unique_queries.append(q)
 
-    # 2) resolve queries to DB papers (local only)
+    # 2) resolve queries to DB papers (local only, but allow CrossRef fallback and patient persistence)
     query_to_paper: Dict[str, Any] = {}
     unresolved: List[str] = []
     for q in unique_queries:
-        paper = _find_paper(db, q)
+        # pass run_id so _find_paper may persist a CrossRef-discovered paper
+        paper = _find_paper(db, q, run_id=run_id)
         if paper:
             query_to_paper[q] = paper
-            # ensure a citation row exists (index will be set later)
             _ensure_citation_row(db, run_id, paper.id, q)
         else:
             unresolved.append(q)
 
-    # 3) assign stable numeric indices to citations (order reflects the order of resolved placeholders)
-    # We'll fetch citations for this run and assign indices for those papers we resolved (in resolved order).
+    # 3) fetch all citation rows for this run (we will set indices deterministically)
     try:
-        # get all citations for this run (we will update indices for resolved ones)
         db_citations = db.query(crud.models.Citation).filter(crud.models.Citation.run_id == run_id).all()
     except Exception:
         db_citations = []
 
-    # map paper_id -> citation ORM object (choose latest if multiple)
+    # Map paper_id -> Citation ORM (if exists)
     paperid_to_cite = {}
     for c in db_citations:
         if getattr(c, "paper_id", None):
             paperid_to_cite[c.paper_id] = c
 
-    # Now enumerate resolved papers in the same order as query_to_paper
+    # 4) assign indices to resolved papers in the order of unique_queries (deterministic)
     assigned_index_map: Dict[int, int] = {}
     next_idx = 1
-    for q in query_to_paper.keys():
-        p = query_to_paper[q]
+    for q in unique_queries:
+        p = query_to_paper.get(q)
         if not p:
             continue
+        # prefer existing citation row if present
         cite = paperid_to_cite.get(p.id)
-        if cite:
-            cite.index = next_idx
-            try:
-                db.commit()
-            except Exception:
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-            assigned_index_map[p.id] = next_idx
+        if cite and getattr(cite, "index", None) and cite.index > 0:
+            assigned_index_map[p.id] = cite.index
+            # ensure next_idx is beyond
+            if cite.index >= next_idx:
+                next_idx = cite.index + 1
+            continue
+        # else assign current next_idx and update/create citation row
+        assigned_index_map[p.id] = next_idx
+        try:
+            if cite:
+                cite.index = next_idx
+            else:
+                # create a new citation if none exists
+                newc = crud.add_citation(db, run_id, p.id, schemas.CitationBase(context=q, index=next_idx))
+                # reflect in mapping
+                paperid_to_cite[p.id] = newc
             next_idx += 1
-        else:
-            # create citation row (if for some reason _ensure_citation_row didn't produce it)
-            try:
-                new_c = crud.add_citation(db, run_id, p.id, schemas.CitationBase(context=q, index=next_idx))
-                assigned_index_map[p.id] = next_idx
-                next_idx += 1
-            except Exception:
-                # skip but continue numbering
-                assigned_index_map[p.id] = next_idx
-                next_idx += 1
+        except Exception:
+            # if DB insert/update fails, still increment index and continue
+            next_idx += 1
+            continue
 
-    # 4) Replace placeholders in section texts for resolved queries
+    # attempt a single commit after batch updates (best-effort)
+    try:
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    # 5) Replace placeholders in section texts for resolved queries
     def _replace_match(m):
         inner = m.group(1).strip()
         p = query_to_paper.get(inner)
         if not p:
-            # unresolved: keep placeholder
+            # unresolved: keep original placeholder
             return m.group(0)
-        # find citation index (from DB or assigned_index_map)
-        c = None
-        try:
-            c = db.query(crud.models.Citation).filter(crud.models.Citation.run_id == run_id, crud.models.Citation.paper_id == p.id).first()
-        except Exception:
-            c = None
-        idx = None
-        if c and getattr(c, "index", None):
-            idx = c.index
-        else:
-            idx = assigned_index_map.get(p.id)
+        # lookup assigned index
+        idx = assigned_index_map.get(p.id)
         if idx:
             return f"[{idx}]"
         return m.group(0)
@@ -266,14 +357,10 @@ def enrich_references(sections: Dict[str, str], run_id: int, db: Session) -> Dic
         except Exception as e:
             print(f"[Citation Replace] failed for section '{name}': {e}")
 
-    # 5) Build References list from the assigned citation indices (ordered by index)
+    # 6) Build References list from assigned indices and any remaining citation rows
     refs_by_index: Dict[int, str] = {}
-    try:
-        db_citations = db.query(crud.models.Citation).filter(crud.models.Citation.run_id == run_id).all()
-    except Exception:
-        db_citations = []
 
-    # ensure we include citations for resolved papers first (in assigned_index_map order)
+    # Add assigned map entries first (deterministic order)
     for paper_id, idx in assigned_index_map.items():
         try:
             p = db.query(crud.models.Paper).filter(crud.models.Paper.id == paper_id).first()
@@ -282,21 +369,15 @@ def enrich_references(sections: Dict[str, str], run_id: int, db: Session) -> Dic
         except Exception:
             pass
 
-    # include any other citation rows that might exist (and haven't been added above)
+    # Add any other citation rows (that might exist) ensuring no duplicate indices
+    try:
+        db_citations = db.query(crud.models.Citation).filter(crud.models.Citation.run_id == run_id).all()
+    except Exception:
+        db_citations = []
+
     for c in db_citations:
-        idx = getattr(c, "index", None) or None
-        if not idx:
-            # assign a sequential index if missing and not already in refs_by_index
-            idx = max(refs_by_index.keys(), default=0) + 1
-            try:
-                c.index = idx
-                db.commit()
-            except Exception:
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-        if idx in refs_by_index:
+        idx = getattr(c, "index", None)
+        if not idx or idx in refs_by_index:
             continue
         try:
             p = db.query(crud.models.Paper).filter(crud.models.Paper.id == c.paper_id).first()
@@ -305,7 +386,7 @@ def enrich_references(sections: Dict[str, str], run_id: int, db: Session) -> Dic
         except Exception:
             pass
 
-    # create ordered list of references by numeric index
+    # Generate ordered reference lines
     refs_lines = []
     for idx in sorted(refs_by_index.keys()):
         refs_lines.append(refs_by_index[idx])
@@ -313,7 +394,9 @@ def enrich_references(sections: Dict[str, str], run_id: int, db: Session) -> Dic
     if refs_lines:
         sections["references"] = "\n".join(refs_lines)
     else:
-        sections["references"] = "No references available."
+        # If nothing resolved, do not override an existing references section if present
+        if not sections.get("references"):
+            sections["references"] = "No references available."
 
     # attach debug info on unresolved placeholders
     sections["_unresolved_placeholders"] = unresolved

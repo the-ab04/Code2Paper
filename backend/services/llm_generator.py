@@ -2,8 +2,8 @@
 
 from typing import Dict, Any, List, Optional
 from config import GROQ_API_KEY, MODEL_NAME
-from langchain_groq import ChatGroq
-from services.rag_retriever import query_chunks
+# NOTE: langchain_groq and query_chunks are imported lazily inside functions to
+# avoid circular imports and reduce cold-start time.
 import json
 import re
 
@@ -20,45 +20,46 @@ SYSTEM_PROMPT = (
 SECTION_INSTRUCTIONS = {
     "title": (
         "Write a clear, descriptive paper title (8–16 words) summarizing the main contribution. "
-        "Avoid citations and punctuation-heavy qualifiers. Keep it formal and concise."
+        "Avoid citations, dataset names in parentheses, dates, file names, UUIDs, or punctuation-heavy qualifiers. "
+        "Keep it formal and concise."
     ),
     "abstract": (
-        "Write a single-paragraph abstract (120–220 words) summarizing: problem, approach, key results, "
-        "and main contributions. Do NOT include citation placeholders in the abstract; omit them if present."
+        "Write a single-paragraph abstract (120–220 words) that summarizes: the problem, approach, key results, "
+        "and main contributions. Do NOT include citation placeholders in the abstract; remove them if present."
     ),
     "introduction": (
-        "Write an Introduction: motivate the problem, give short background, state the gap, and list the "
-        "contributions of this work in bullet-like sentences (but keep the output as a coherent paragraph(s)). "
-        "Insert citation placeholders as [CITATION: query] when referencing prior work. Prefer DOIs if known."
+        "Write an Introduction: motivate the problem, provide brief background, identify the gap, and list the "
+        "contributions of this work. Use citation placeholders [CITATION: query] when referencing prior work. "
+        "Prefer DOIs when available. Keep the tone formal and concise."
     ),
     "literature_review": (
-        "Write a Literature Review section that summarizes prior work related to the task. "
-        "Group related works by theme or approach, compare representative methods/benchmarks, and highlight gaps "
-        "that motivate the present work. Use citation placeholders in the format [CITATION: query] for specific "
-        "papers (prefer DOIs if available). Aim for a coherent synthesis rather than a long list of individual papers."
+        "Write a Literature Review that synthesizes prior work relevant to the task. Group related works by theme/approach "
+        "(3–6 themes), briefly compare representative methods/benchmarks for each theme, and highlight remaining gaps "
+        "that justify the present work. Insert citation placeholders [CITATION: query] when referencing specific papers "
+        "(prefer DOIs). Aim for synthesis and comparison rather than a long unstructured list."
     ),
     "methods": (
-        "Write a Methods section describing the model/architecture, datasets, training, hyperparameters, and any "
-        "implementation details necessary to reproduce the work. Use citation placeholders [CITATION: query] where "
-        "appropriate to reference methods from the literature. Prefer DOIs if known."
+        "Write a Methods section describing the model/architecture, datasets, preprocessing, training, hyperparameters, "
+        "and implementation details necessary to reproduce results. Use citation placeholders [CITATION: query] where "
+        "relevant to reference standard model components or datasets."
     ),
     "experiments": (
-        "Write an Experiments section describing the evaluation protocol, datasets/splits, baselines, metrics, and "
-        "experimental setup. Use citation placeholders where comparing to prior works. Prefer DOIs if known."
+        "Write an Experiments section describing datasets/splits, evaluation protocol, baselines, metrics, and the exact "
+        "experimental procedure (runs/seeds/hyperparameter sweep). Use citation placeholders only when comparing to prior work."
     ),
     "results": (
-        "Write a Results section summarizing quantitative and qualitative findings, include key tables/metrics "
-        "phrases (no raw tables), and mention notable observations. Do NOT include citation placeholders in the abstract; omit them if present."
+        "Write a Results section summarizing quantitative and qualitative findings. Include key metric phrases (e.g., "
+        "\"achieved 92% top-1 accuracy\") and salient observations. Do NOT include citation placeholders; omit them if present."
     ),
-
     "conclusion": (
-        "Write a short Conclusion (2–4 sentences) summarizing the work and listing future directions.Do NOT include citation placeholders in the abstract; omit them if present."
+        "Write a short Conclusion (2–4 sentences) summarizing the main takeaways and proposing future directions. "
+        "Do NOT include citation placeholders in the conclusion; remove them if present."
     ),
     # 'references' is handled separately and must return valid JSON array
     "references": (
-        "Return a JSON array of citation placeholders (strings). Each item should be a short query suitable for "
-        "CrossRef lookup or the format used by downstream citation resolver, e.g. a paper title or DOI. "
-        "Prefer DOIs if available. Return only JSON array, nothing else."
+        "Return a JSON array of citation placeholders (strings). Each element should be a short query suitable for "
+        "CrossRef lookup or the format used by downstream citation resolver, e.g. a paper title or DOI. Prefer DOIs if available. "
+        "Return only a JSON array, nothing else."
     )
 }
 
@@ -68,9 +69,22 @@ CITATION_PATTERN = re.compile(r"\[CITATION:\s*([^\]]+)\]", re.I)
 
 # === Helpers: LLM client / safe invoke ===
 def _get_llm(model_name: Optional[str] = None):
+    """
+    Lazily import and construct the LLM client. This avoids importing the 3rd-party
+    client at module import time (prevents circular imports and speeds startup).
+    """
     if not GROQ_API_KEY:
         raise RuntimeError("GROQ_API_KEY is missing in config.")
-    return ChatGroq(model=model_name or MODEL_NAME, temperature=0.15, groq_api_key=GROQ_API_KEY)
+    try:
+        # Lazy import to avoid heavy import at module load time
+        from langchain_groq import ChatGroq
+    except Exception as e:
+        raise RuntimeError(f"Failed to import langchain_groq.ChatGroq: {e}")
+
+    try:
+        return ChatGroq(model=model_name or MODEL_NAME, temperature=0.15, groq_api_key=GROQ_API_KEY)
+    except Exception as e:
+        raise RuntimeError(f"Failed to initialize ChatGroq client: {e}")
 
 
 def _safe_invoke(llm, prompt: str) -> str:
@@ -181,6 +195,50 @@ def _format_candidate_block(candidate_papers: List[Dict[str, Any]]) -> str:
     return block
 
 
+# === Facts summary helper ===
+def _build_facts_summary(facts: Dict[str, Any]) -> str:
+    """
+    Build a short, high-signal summary of the notebook facts to include in prompts.
+    Prefer compact bullet-like sentences that convey task, datasets, methods, frameworks and top metrics.
+    """
+    parts = []
+    task = facts.get("task")
+    if task:
+        parts.append(f"Task: {task}")
+
+    datasets = facts.get("datasets", []) or []
+    if datasets:
+        parts.append("Datasets: " + ", ".join(datasets[:4]))
+
+    methods = facts.get("methods", []) or []
+    if methods:
+        parts.append("Methods: " + ", ".join(methods[:4]))
+
+    frameworks = facts.get("frameworks", []) or []
+    if frameworks:
+        parts.append("Frameworks: " + ", ".join(frameworks[:4]))
+
+    metrics = facts.get("metrics", []) or []
+    if metrics:
+        parts.append("Metrics: " + ", ".join(metrics[:4]))
+
+    # include a short markdown preview (first meaningful line)
+    md_blocks = facts.get("markdown", []) or []
+    md_preview = ""
+    for m in md_blocks:
+        if isinstance(m, str) and m.strip():
+            md_preview = m.strip().splitlines()[0]
+            if len(md_preview) > 200:
+                md_preview = md_preview[:200] + "..."
+            break
+    if md_preview:
+        parts.append(f"Notebook note: {md_preview}")
+
+    if not parts:
+        return ""
+    return " | ".join(parts)
+
+
 # === Title sanitization helper ===
 def _sanitize_title(raw_title: str, fallback: str = "") -> str:
     """
@@ -242,21 +300,7 @@ def generate_sections(
     """
     Generate paper sections.
 
-    Args:
-      facts: notebook-extracted facts dict (markdown, code, logs, datasets, metrics, ...).
-      sections_to_generate: optional list of section names to generate (e.g. ["abstract","methods"]).
-                           If None, generate all sections.
-      model_name: override model name for Groq (optional).
-      use_rag: whether to include retrieved literature context.
-      top_k: number of retrieved chunks to use.
-      rag_context_override: if provided, this string will be inserted as the retrieved context
-                            instead of performing a live query (useful for testing or custom context).
-      candidate_papers: optional list of paper metadata dicts (title, doi, authors, year, venue, ...) that
-                        the LLM is allowed to cite. If provided, the LLM is instructed to ONLY cite from this list.
-
-    Returns:
-      dict mapping section_name -> section_text. For 'references' the string contains newline-separated
-      placeholders like "[CITATION: ...]". Only requested/generated sections are returned.
+    Note: query_chunks is imported lazily to avoid circular import issues.
     """
     llm = _get_llm(model_name)
 
@@ -290,7 +334,10 @@ def generate_sections(
     datasets = ", ".join(facts.get("datasets", []))
     metrics = ", ".join(facts.get("metrics", []))
 
-    # RAG: retrieve relevant chunks and create a compact context block
+    # Build a short, high-signal facts summary for the LLM
+    facts_summary = _build_facts_summary(facts)
+
+    # RAG: retrieve relevant chunks and create a compact context block (lazy import)
     rag_context = ""
     if rag_context_override:
         rag_context = rag_context_override
@@ -298,11 +345,22 @@ def generate_sections(
         queries = []
         if facts.get("task"):
             queries.append(facts["task"])
+        # include summary as a high priority query if present
+        if facts_summary:
+            queries.insert(0, facts_summary)
         queries.extend(facts.get("datasets", [])[:2])
         queries.extend(facts.get("methods", [])[:2] if facts.get("methods") else [])
 
         if queries:
-            chunks = query_chunks(queries, top_k=top_k)
+            try:
+                # lazy import to avoid circular dependency at module import time
+                from services.rag_retriever import query_chunks as _query_chunks
+                chunks = _query_chunks(queries, top_k=top_k)
+            except Exception as e:
+                # Don't fail the whole generation if retriever is unavailable
+                print(f"[RAG] query_chunks failed or not available: {e}")
+                chunks = []
+
             if chunks:
                 rag_context = "=== Retrieved Literature Chunks ===\n"
                 for idx, ch in enumerate(chunks, start=1):
@@ -318,6 +376,7 @@ def generate_sections(
     common_context = (
         f"{SYSTEM_PROMPT}\n\n"
         f"{candidate_block}\n"
+        f"Notebook facts (short): {facts_summary}\n\n"
         f"Notebook facts (sample):\n{md}\n\n"
         f"Code sample:\n{code_hint}\n\n"
         f"Training logs:\n{logs}\n\n"
@@ -455,19 +514,15 @@ def generate_sections(
                 text = _remove_citation_placeholders(text).strip()
                 text = re.sub(r"\s{2,}", " ", text)
                 text = re.sub(r"\s+([.,;:])", r"\1", text)
-                
+
             # Remove citation placeholders from results and conclusion explicitly
             if section in ("results", "conclusion"):
-                # remove both placeholder tokens and any stray numeric [CITATION: ...]
                 text = _remove_citation_placeholders(text).strip()
-                # Optional: also remove leftover bracketed forms like [CITATION: ...] variants
                 text = re.sub(r"\[CITATION:[^\]]+\]", "", text, flags=re.I)
-                # tidy whitespace/punctuation
                 text = re.sub(r"\s{2,}", " ", text)
                 text = re.sub(r"\s+([.,;:])", r"\1", text)
 
             produced[section] = text
-            # lightweight debug log (first 150 chars)
             preview = (text[:200] + '...') if len(text) > 200 else text
             print(f"[LLM] Produced {section}: {preview!r}")
 

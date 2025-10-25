@@ -8,6 +8,8 @@ from routes.paper_routes import router as paper_router
 from routes.user_routes import router as user_router
 from db.init_db import init_db
 
+import uvicorn
+
 # --- Initialize App ---
 app = FastAPI(
     title="Code2Paper Backend",
@@ -46,3 +48,6 @@ def root():
 # so no need to duplicate them here.
 app.include_router(paper_router)
 app.include_router(user_router)
+
+if __name__ == "__main__":
+    uvicorn.run("app:app",host="localhost",port=8001,reload=True)
