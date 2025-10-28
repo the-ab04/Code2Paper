@@ -401,4 +401,98 @@ def enrich_references(sections: Dict[str, str], run_id: int, db: Session) -> Dic
     # attach debug info on unresolved placeholders
     sections["_unresolved_placeholders"] = unresolved
 
+    # -------------------------------------------------------------
+    # FINAL NORMALIZATION: convert figure placeholders to "Figure N"
+    # (e.g., "Figure[1]" -> "Figure 1", "fig1" -> "Figure 1", "Fig. (1):" -> "Figure 1")
+    # Also transforms grouped forms like "Figures [1] and [2]" -> "Figures 1 and 2"
+    # Only targets tokens containing 'fig'/'figure' to avoid changing unrelated bracketed numbers.
+    # -------------------------------------------------------------
+    def _normalize_figure_placeholders_in_text(text: Optional[str]) -> Optional[str]:
+        if not text or not isinstance(text, str):
+            return text
+        t = text
+
+        # --- Handle grouped "Figures [...] [..] and [...]" forms first ---
+        # Matches: "Figures [1] and [2]", "Figures: [1, 2]", "Figures [1][2]" etc.
+        group_pat = re.compile(
+            r'\b(Figures?|Figures?:?)\s*[:\.\-]?\s*((?:[\(\[]\s*\d{1,4}\s*[\)\]]\s*(?:,|\s+and\s+|\s*[-–—]\s*)?)+)',
+            flags=re.I,
+        )
+
+        def _group_repl(m):
+            head = m.group(1) or "Figures"
+            body = m.group(2) or ""
+            # extract all numeric tokens and ranges if present
+            # preserve ranges like "1-3" by capturing them first
+            ranges = re.findall(r'(\d{1,4}\s*[-–—]\s*\d{1,4})', body)
+            # extract individual numbers
+            nums = re.findall(r'(\d{1,4})', body)
+            parts: List[str] = []
+
+            # If ranges found, include them (they'll also produce numbers in nums; keep ranges first)
+            used_numbers = set()
+            for r in ranges:
+                # normalize dashes
+                r_norm = re.sub(r'\s*[-–—]\s*', '-', r)
+                parts.append(r_norm)
+                # mark numbers in range as used
+                mnums = re.findall(r'(\d{1,4})', r)
+                for mn in mnums:
+                    used_numbers.add(mn)
+
+            # Add remaining single numbers in appearance order
+            for n in nums:
+                if n in used_numbers:
+                    continue
+                parts.append(n)
+                used_numbers.add(n)
+
+            # Build connective string: "1", "1 and 2", "1, 2 and 3"
+            if not parts:
+                return head  # fallback: return only the head word
+            if len(parts) == 1:
+                # singular -> use "Figure N" (singular)
+                return f"Figure {parts[0]}"
+            else:
+                # plural head normalization: ensure 'Figures' (plural)
+                head_plural = "Figures"
+                if len(parts) == 2:
+                    return f"{head_plural} {parts[0]} and {parts[1]}"
+                # more than 2: comma separated with 'and' before last
+                return f"{head_plural} " + ", ".join(parts[:-1]) + f" and {parts[-1]}"
+
+        t = group_pat.sub(_group_repl, t)
+
+        # Pattern 1: fig/figure with optional punctuation and optional brackets/parentheses around the number
+        pat = re.compile(
+            r'\b(?:fig(?:\.|ure)?|figure)\s*[:\.\-]?\s*[\(\[\s]*\s*(\d{1,4})\s*[\)\]\s]*',
+            flags=re.I,
+        )
+
+        t = pat.sub(lambda m: f"Figure {m.group(1)}", t)
+
+        # Pattern 2: tightly joined forms like "fig1" or "figure1"
+        pat2 = re.compile(r'\b(?:fig(?:ure)?)(\d{1,4})\b', flags=re.I)
+        t = pat2.sub(lambda m: f"Figure {m.group(1)}", t)
+
+        # Collapse multiple spaces introduced by replacements
+        t = re.sub(r'\s{2,}', ' ', t).strip()
+        return t
+
+    try:
+        # Apply normalization to all textual sections except 'references' and internal keys starting with '_'
+        for k in list(sections.keys()):
+            if not isinstance(sections.get(k), str):
+                continue
+            if k == "references" or k.startswith("_"):
+                continue
+            try:
+                sections[k] = _normalize_figure_placeholders_in_text(sections[k])
+            except Exception:
+                # do not break the flow if normalization fails for a section
+                pass
+    except Exception:
+        # swallow errors in final normalization
+        pass
+
     return sections

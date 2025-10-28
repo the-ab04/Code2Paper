@@ -10,11 +10,21 @@ import os
 import base64
 import uuid
 from pathlib import Path
+import logging
+import json
 
-# Directory to save extracted images from notebook outputs
-FIGURES_DIR = Path("storage/outputs/figures")
+logger = logging.getLogger(__name__)
+
+# Configurable storage root and figures dir
+STORAGE_ROOT = os.getenv("STORAGE_DIR", "storage")
+FIGURES_DIR = Path(STORAGE_ROOT) / "outputs" / "figures"
 FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 
+# How many figures to keep (tunable via env)
+try:
+    DEFAULT_MAX_FIGURES = int(os.getenv("MAX_FIGURES", "3"))
+except Exception:
+    DEFAULT_MAX_FIGURES = 3
 
 # ---------- AST helpers (unchanged) ----------
 
@@ -161,9 +171,8 @@ def generate_summary_with_llm(concise_context: str, fallback: str = "") -> str:
                 summary = " ".join(parts[:3]).strip()
                 if summary:
                     return summary
-    except Exception:
-        # if anything goes wrong, fall back to heuristic below
-        pass
+    except Exception as e:
+        logger.debug("LLM summary generation unavailable or failed: %s", e)
 
     # deterministic fallback: return provided fallback (if any) or a truncated context
     if fallback:
@@ -202,8 +211,6 @@ def _extract_metrics_from_text(text: str) -> Dict[str, float]:
                 k = "accuracy"
             if k.startswith("f1"):
                 k = "f1"
-            if k in ("mse", "rmse"):
-                k = k
             metrics_found[k] = num
         except Exception:
             continue
@@ -228,13 +235,15 @@ def _save_base64_image(raw: Any, mime: str) -> Optional[str]:
     bin_data = None
     try:
         if isinstance(raw, str):
-            bin_data = base64.b64decode(raw)
+            # strip whitespace which sometimes breaks decoding
+            raw_str = raw.strip()
+            bin_data = base64.b64decode(raw_str, validate=False)
         elif isinstance(raw, (bytes, bytearray)):
             bin_data = bytes(raw)
         else:
             return None
     except Exception:
-        # sometimes raw is already bytes but base64.b64decode fails; try to use raw as-is
+        # sometimes raw is not base64 but already binary in strange form; try to coerce
         try:
             if isinstance(raw, (bytes, bytearray)):
                 bin_data = bytes(raw)
@@ -256,15 +265,119 @@ def _save_base64_image(raw: Any, mime: str) -> Optional[str]:
         with open(p, "wb") as fh:
             fh.write(bin_data)
         return str(p)
-    except Exception:
+    except Exception as e:
+        logger.debug("Failed to save image to disk: %s", e)
         return None
+
+
+def _extract_caption_hint_from_code_block(code_block: str) -> Optional[str]:
+    """
+    Look for plt.title/plt.xlabel/plt.ylabel/ax.set_title/ax.set_xlabel/ax.set_ylabel, sns.title, etc.
+    Return a short cleaned hint (first match).
+    """
+    if not code_block:
+        return None
+    # look for common plotting calls with string args
+    patterns = [
+        r"plt\.title\s*\(\s*['\"]([^'\"]{2,200})['\"]\s*\)",
+        r"plt\.xlabel\s*\(\s*['\"]([^'\"]{2,200})['\"]\s*\)",
+        r"plt\.ylabel\s*\(\s*['\"]([^'\"]{2,200})['\"]\s*\)",
+        r"ax\.set_title\s*\(\s*['\"]([^'\"]{2,200})['\"]\s*\)",
+        r"ax\.set_xlabel\s*\(\s*['\"]([^'\"]{2,200})['\"]\s*\)",
+        r"ax\.set_ylabel\s*\(\s*['\"]([^'\"]{2,200})['\"]\s*\)",
+        r"sns\.heatmap\s*\(",
+        r"plt\.imshow\s*\(",
+        r"plt\.plot\s*\(",
+    ]
+    for pat in patterns:
+        m = re.search(pat, code_block, flags=re.I)
+        if m:
+            # if group captured text, return it; otherwise return function name hint
+            if m.groups():
+                hint = m.group(1)
+                if hint:
+                    return hint.strip()[:240]
+            # fallback hints
+            name_hint = pat.split("\\")[0].split(".")[0]
+            return name_hint
+    return None
+
+
+def _select_useful_figures(images: List[Dict[str, Any]], outputs: List[Dict[str, Any]], code_blocks: List[str], max_figs: int = DEFAULT_MAX_FIGURES) -> List[Dict[str, Any]]:
+    """
+    Heuristic scoring to pick the most useful figures:
+      - preference if nearby cell output contains metric keywords (accuracy, loss, etc.)
+      - slight preference for png/jpeg and larger file size
+      - prefer figures appearing later (assumes later figures are results)
+      - attempt to attach a caption_hint from code (xlabel/title) or from output text
+    Returns a subset (<= max_figs) preserving metadata and a short caption_hint.
+    """
+    scored: List[Tuple[float, Dict[str, Any]]] = []
+    for img in images:
+        score = 0.0
+        path = img.get("path")
+        mime = img.get("mime", "")
+        cell_idx = img.get("cell_index", None)
+
+        # file-size bump
+        try:
+            sz = os.path.getsize(path)
+            score += min(3.0, sz / 100_000.0)
+        except Exception:
+            pass
+
+        # mime preference
+        if "png" in (mime or "") or "jpeg" in (mime or "") or "jpg" in (mime or ""):
+            score += 0.5
+
+        # prefer images from code cells that had metric outputs
+        hint = ""
+        if isinstance(outputs, list) and cell_idx is not None:
+            for o in outputs:
+                if o.get("cell_index") == cell_idx:
+                    txt = (o.get("text") or "") + " " + (o.get("error") or "")
+                    if re.search(r"\b(accuracy|acc|loss|f1|precision|recall|auc|mse|rmse)\b", txt, flags=re.I):
+                        score += 3.0
+                    # use first non-empty line from output text as hint
+                    first_line = ""
+                    for ln in (txt or "").splitlines():
+                        ln2 = ln.strip()
+                        if ln2:
+                            first_line = ln2
+                            break
+                    if first_line:
+                        hint = first_line[:240]
+                    break
+
+        # try to extract caption hint from corresponding code block if available
+        if (not hint) and isinstance(code_blocks, list) and cell_idx is not None and 0 <= cell_idx < len(code_blocks):
+            code_hint = _extract_caption_hint_from_code_block(code_blocks[cell_idx])
+            if code_hint:
+                hint = code_hint
+                score += 1.5
+
+        # prefer later images (results plots are often later)
+        if cell_idx is not None:
+            score += (cell_idx or 0) * 0.01
+
+        # Provide a fallback hint if none found: use filename
+        if not hint:
+            hint = os.path.basename(path)
+
+        scored.append((score, {"path": path, "mime": mime, "cell_index": cell_idx, "caption_hint": hint}))
+
+    # sort and take top-K
+    scored.sort(key=lambda x: x[0], reverse=True)
+    selected = [entry for _, entry in scored[:max_figs]]
+    return selected
 
 
 # ---------- Main: parse_notebook (AST + LLM summary + outputs/metrics) ----------
 
-def parse_notebook(nb_path: str) -> Dict[str, Any]:
+def parse_notebook(nb_path: str, max_figures: int = DEFAULT_MAX_FIGURES) -> Dict[str, Any]:
     """
-    Parse an .ipynb or .py file and extract AST-based facts, outputs (including images), and produce a short LLM-driven summary.
+    Parse an .ipynb or .py file and extract AST-based facts, outputs (including images),
+    and produce a short LLM-driven summary.
 
     Returned dict includes:
       - summary: str (1–3 sentence summary generated by LLM or fallback)
@@ -277,7 +390,8 @@ def parse_notebook(nb_path: str) -> Dict[str, Any]:
       - frameworks: List[str] frameworks detected (PyTorch/TensorFlow/scikit-learn)
       - outputs: List[Dict] of per-code-cell outputs: {cell_index, text, error, images}
       - images: List[Dict] of saved image records {path, mime, cell_index}
-      - final_metrics: Dict[str, float] mapping metric -> last observed numeric value (heuristic)
+      - figures: List[Dict] selected useful figures {path, mime, cell_index, caption_hint}
+      - final_metrics / output_metrics: Dict[str, float] mapping metric -> last observed numeric value
       - combined_text: small snippet for backward compatibility
     """
     # support .py fallback: treat whole file as a code block
@@ -286,7 +400,7 @@ def parse_notebook(nb_path: str) -> Dict[str, Any]:
     code_blocks: List[str] = []
     outputs_list: List[Dict[str, Any]] = []
     images_list: List[Dict[str, Any]] = []
-    collected_metric_occurrences: List[Tuple[str, float, int]] = []  # (metric, value, global_order)
+    collected_metric_occurrences: List[Tuple[str, float, int]] = []  # (metric, value, order)
 
     global_metric_counter = 0
 
@@ -301,18 +415,15 @@ def parse_notebook(nb_path: str) -> Dict[str, Any]:
         # attempt to read as notebook; if that fails try to read as plain text
         try:
             nb = nbformat.read(nb_path, as_version=4)
-            for cell_index, cell in enumerate(nb.cells):
+            for raw_cell_index, cell in enumerate(nb.cells):
                 cell_type = cell.get("cell_type")
                 source = cell.get("source", "") or ""
                 if isinstance(source, list):
                     source = "\n".join(source)
                 source = source.strip()
-                if not source and cell_type != "code":
-                    # still capture markdown
-                    if cell_type == "markdown" and source:
-                        md_blocks.append(source)
-                    continue
+
                 if cell_type == "code":
+                    # append code block first so code_blocks index matches cell index
                     code_blocks.append(source)
 
                     # handle outputs for this code cell
@@ -329,7 +440,6 @@ def parse_notebook(nb_path: str) -> Dict[str, Any]:
                                 txt = "".join(txt)
                             if txt:
                                 text_parts.append(str(txt))
-                                # extract metrics from this stream text
                                 metrics_here = _extract_metrics_from_text(str(txt))
                                 for mk, mv in metrics_here.items():
                                     global_metric_counter += 1
@@ -363,7 +473,6 @@ def parse_notebook(nb_path: str) -> Dict[str, Any]:
                             tbtext = "\n".join(tb) if isinstance(tb, list) else str(tb)
                             err = f"{ename}: {evalue}\n{tbtext}"
                             error_text += err
-                            # also treat traceback as potential metric source (rare)
                             metrics_here = _extract_metrics_from_text(err)
                             for mk, mv in metrics_here.items():
                                 global_metric_counter += 1
@@ -485,7 +594,6 @@ def parse_notebook(nb_path: str) -> Dict[str, Any]:
     # summarize metric occurrences (take last-occurrence per metric name)
     final_metrics: Dict[str, float] = {}
     if collected_metric_occurrences:
-        # sort by the recorded order (already in occurrence order)
         # keep last seen numeric value for each metric
         for mk, mv, order in collected_metric_occurrences:
             final_metrics[mk] = mv
@@ -509,6 +617,9 @@ def parse_notebook(nb_path: str) -> Dict[str, Any]:
     summary = generate_summary_with_llm(concise_context=concise_context, fallback=fallback_summary)
     summary = summary.strip()
 
+    # select useful figures from images_list
+    selected_figures = _select_useful_figures(images_list, outputs_list, code_blocks, max_figs=max_figures) if images_list else []
+
     # Build returned facts dict (keeps minimal fields but includes AST outputs + outputs/images/metrics)
     facts: Dict[str, Any] = {
         "summary": summary,
@@ -520,10 +631,36 @@ def parse_notebook(nb_path: str) -> Dict[str, Any]:
         "functions": ast_aggregate["functions"],
         "frameworks": ast_aggregate["frameworks_found"],
         "outputs": outputs_list,
-        "images": images_list,
+        "images": images_list,            # raw saved images
+        "figures": selected_figures,      # selected useful figures (top-N) with caption_hint
+        # Keep both names for compatibility:
         "final_metrics": final_metrics,
+        "output_metrics": final_metrics,  # alias preferred by other modules
         # keep a small combined_text for backward compatibility (limited)
         "combined_text": (concise_context or code_preview)[:1200],
     }
 
+    # also populate metrics list in a compact form for backwards compatibility
+    metric_list = []
+    for k, v in final_metrics.items():
+        metric_list.append(f"{k}: {v}")
+    if metric_list:
+        facts.setdefault("metrics", []).extend(metric_list)
+
     return facts
+
+
+# quick test guard (unchanged)
+if __name__ == "__main__":
+    test_path = "sample_inputs/sample_notebook.ipynb"
+    try:
+        facts = parse_notebook(test_path)
+        print("Notebook facts extracted:")
+        for key, value in facts.items():
+            if isinstance(value, list):
+                preview = value[:5]
+                print(f"{key} ({len(value)}): {preview} ...")
+            else:
+                print(f"{key}: {str(value)[:200]}")
+    except Exception as e:
+        print(f"Error: {e}")

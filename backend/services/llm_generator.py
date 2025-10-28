@@ -6,6 +6,7 @@ from config import GROQ_API_KEY, MODEL_NAME
 # avoid circular imports and reduce cold-start time.
 import json
 import re
+import os
 
 # === System-level guidance for all prompts ===
 SYSTEM_PROMPT = (
@@ -20,48 +21,50 @@ SYSTEM_PROMPT = (
 SECTION_INSTRUCTIONS = {
     "title": (
         "Write a clear, descriptive paper title (8–16 words) summarizing the main contribution. "
-        "Avoid citations, dataset names in parentheses, dates, file names, UUIDs, or punctuation-heavy qualifiers. "
-        "Keep it formal and concise."
+        "Avoid citations, dataset names in parentheses, dates, file names, UUIDs, or punctuation-heavy qualifiers."
     ),
     "abstract": (
-        "Write a single-paragraph abstract (120–220 words) that summarizes: the problem, approach, key results, "
-        "and main contributions. Do NOT include citation placeholders in the abstract; remove them if present."
+    "Write a single-paragraph abstract (120–220 words) that summarizes the problem, approach, key results, "
+    "and main contributions. Do NOT include citation placeholders in the abstract; remove them if present. "
+    "Do NOT mention or refer to any figures, figure numbers, figure placeholders, or captions — the abstract must "
+    "be self-contained and free of figure-related details."
     ),
     "introduction": (
-        "Write an Introduction: motivate the problem, provide brief background, identify the gap, and list the "
-        "contributions of this work. Use citation placeholders [CITATION: query] when referencing prior work. "
-        "Prefer DOIs when available. Keep the tone formal and concise."
+        "Write an Introduction that motivates the problem, provides brief background, identifies the research gap, "
+        "and lists the contributions of this work. Provide sufficient context so a reader unfamiliar with the code can follow. "
+        "Target length: ~300–600 words. Use citation placeholders [CITATION: query] when referencing prior work; prefer DOIs."
     ),
     "literature_review": (
         "Write a Literature Review that synthesizes prior work relevant to the task. Group related works by theme/approach "
-        "(3–6 themes), briefly compare representative methods/benchmarks for each theme, and highlight remaining gaps "
-        "that justify the present work. Insert citation placeholders [CITATION: query] when referencing specific papers "
-        "(prefer DOIs). Aim for synthesis and comparison rather than a long unstructured list."
+        "(3–6 themes), compare representative methods/benchmarks for each theme, and highlight remaining gaps that justify the present work. "
+        "Aim to be comprehensive and analytic rather than a short list. Target length: ~600–1000 words. Insert citation placeholders [CITATION: query] where appropriate (prefer DOIs)."
     ),
     "methods": (
-        "Write a Methods section describing the model/architecture, datasets, preprocessing, training, hyperparameters, "
-        "and implementation details necessary to reproduce results. Use citation placeholders [CITATION: query] where "
-        "relevant to reference standard model components or datasets."
+        "Write a Methods section describing the model/architecture, datasets, preprocessing, training procedures, hyperparameters, "
+        "and implementation details necessary to reproduce results. Be specific about shapes, training loops, optimizer, learning rates, and seeds where known. "
+        "Target length: ~500–900 words. Use citation placeholders [CITATION: query] for standard components/datasets when relevant."
     ),
     "experiments": (
-        "Write an Experiments section describing datasets/splits, evaluation protocol, baselines, metrics, and the exact "
-        "experimental procedure (runs/seeds/hyperparameter sweep). Use citation placeholders only when comparing to prior work."
+        "Write an Experiments section describing datasets and splits, evaluation protocol, baselines, metrics, and the experimental procedure "
+        "(runs/seeds/hyperparameter sweeps). Provide enough detail to reproduce the experiments. Target length: ~400–800 words. Use citation placeholders only when comparing to prior work."
     ),
     "results": (
-        "Write a Results section summarizing quantitative and qualitative findings. Include key metric phrases (e.g., "
-        "\"achieved 92% top-1 accuracy\") and salient observations. Do NOT include citation placeholders; omit them if present."
+    "Write a concise Results section (150–300 words) summarizing key quantitative and qualitative findings. "
+    "Focus only on main performance metrics, trends, and observations. "
+    "Avoid repeating methodology or dataset descriptions. "
+    "Refer to figures only briefly and only when necessary (e.g., 'Figure 1 shows model accuracy trends'), "
+    "without describing every figure in detail. "
+    "Do NOT include raw code outputs, redundant explanations, or any placeholder text."
     ),
     "conclusion": (
         "Write a short Conclusion (2–4 sentences) summarizing the main takeaways and proposing future directions. "
-        "Do NOT include citation placeholders in the conclusion; remove them if present."
+        "Do NOT include citation placeholders in the conclusion; remove them if present. Target length: ~40–120 words."
     ),
-    # 'references' is handled separately and must return valid JSON array
     "references": (
-        "Return a JSON array of citation placeholders (strings). Each element should be a short query suitable for "
-        "CrossRef lookup or the format used by downstream citation resolver, e.g. a paper title or DOI. Prefer DOIs if available. "
-        "Return only a JSON array, nothing else."
-    )
+        "Return a JSON array of citation placeholders (strings). Each element should be a short query suitable for CrossRef lookup or the downstream citation resolver, e.g. a paper title or DOI. Prefer DOIs if available. Return only a JSON array, nothing else."
+    ),
 }
+
 
 # patterns
 CITATION_PATTERN = re.compile(r"\[CITATION:\s*([^\]]+)\]", re.I)
@@ -126,7 +129,7 @@ def _extract_json_array(text: str) -> List[str]:
         try:
             parsed = json.loads(arr_text)
             if isinstance(parsed, list):
-                return [str(x).strip() for x in parsed if x]
+                return [str(x).strip() for x in parsed if x is not None]
         except Exception:
             # try small repairs: remove trailing commas, newlines etc.
             repaired = re.sub(r",\s*([}\]])", r"\1", arr_text)
@@ -218,9 +221,14 @@ def _build_facts_summary(facts: Dict[str, Any]) -> str:
     if frameworks:
         parts.append("Frameworks: " + ", ".join(frameworks[:4]))
 
-    metrics = facts.get("metrics", []) or []
-    if metrics:
-        parts.append("Metrics: " + ", ".join(metrics[:4]))
+    # Prefer structured output_metrics if present (facts["output_metrics"] is a dict)
+    output_metrics = facts.get("output_metrics") or facts.get("final_metrics") or {}
+    if isinstance(output_metrics, dict) and output_metrics:
+        parts.append("Output metrics: " + ", ".join(f"{k}={v}" for k, v in list(output_metrics.items())[:6]))
+    else:
+        metrics = facts.get("metrics", []) or []
+        if metrics:
+            parts.append("Metrics: " + ", ".join(metrics[:4]))
 
     # include a short markdown preview (first meaningful line)
     md_blocks = facts.get("markdown", []) or []
@@ -287,6 +295,27 @@ def _sanitize_title(raw_title: str, fallback: str = "") -> str:
     return t
 
 
+# helper to build figures block for prompts
+def _format_figures_block(figures: List[Dict[str, Any]]) -> str:
+    """
+    Build a short human-readable figures block:
+      [1] path: <basename> | hint: <caption_hint> | cell: <cell_index>
+    """
+    if not figures:
+        return ""
+    lines = ["=== Notebook Figures (selected) ==="]
+    for idx, f in enumerate(figures, start=1):
+        p = f.get("path") or ""
+        hint = (f.get("caption_hint") or "")[:200]
+        ci = f.get("cell_index")
+        lines.append(f"[{idx}] Path: {os.path.basename(p)} | Hint: {hint or '(none)'} | Cell: {ci}")
+    lines.append(
+        "For each figure above, you may reference it in Results/Methods if relevant. "
+        "When asked, produce one concise, one-sentence caption per figure suitable for inclusion under the image."
+    )
+    return "\n".join(lines) + "\n"
+
+
 # === Main public function ===
 def generate_sections(
     facts: Dict[str, Any],
@@ -328,11 +357,11 @@ def generate_sections(
             requested = section_order[:]
 
     # Prepare notebook context snippet
-    md = "\n\n".join(facts.get("markdown", []))[:4000]
-    code_hint = "\n".join(facts.get("code", [])[:3])
+    md = "\n\n".join(facts.get("markdown", []))[:]
+    code_hint = "\n".join(facts.get("code", [])[:6])
     logs = "\n".join(facts.get("logs", [])[:10])
-    datasets = ", ".join(facts.get("datasets", []))
-    metrics = ", ".join(facts.get("metrics", []))
+    datasets = ", ".join(facts.get("datasets", []) or [])
+    metrics = ", ".join(facts.get("metrics", []) or [])
 
     # Build a short, high-signal facts summary for the LLM
     facts_summary = _build_facts_summary(facts)
@@ -348,7 +377,7 @@ def generate_sections(
         # include summary as a high priority query if present
         if facts_summary:
             queries.insert(0, facts_summary)
-        queries.extend(facts.get("datasets", [])[:2])
+        queries.extend(facts.get("datasets", [])[:2] if facts.get("datasets") else [])
         queries.extend(facts.get("methods", [])[:2] if facts.get("methods") else [])
 
         if queries:
@@ -372,6 +401,15 @@ def generate_sections(
     # Candidate papers block (explicitly allowed cite list)
     candidate_block = _format_candidate_block(candidate_papers) if candidate_papers else ""
 
+    # Figures block (if available)
+    figures_block = _format_figures_block(facts.get("figures") or [])
+
+    # include output_metrics in context (stringified)
+    output_metrics = facts.get("output_metrics") or facts.get("final_metrics") or {}
+    output_metrics_str = ""
+    if isinstance(output_metrics, dict) and output_metrics:
+        output_metrics_str = " | ".join(f"{k}={v}" for k, v in output_metrics.items())
+
     # Construct a common context header inserted into each prompt
     common_context = (
         f"{SYSTEM_PROMPT}\n\n"
@@ -382,6 +420,8 @@ def generate_sections(
         f"Training logs:\n{logs}\n\n"
         f"Datasets: {datasets}\n"
         f"Metrics: {metrics}\n\n"
+        f"Output metrics: {output_metrics_str}\n\n"
+        f"{figures_block}\n"
         f"{rag_context}\n"
     )
 
@@ -490,6 +530,15 @@ def generate_sections(
                 extra = (extra + "\n" if extra else "") + (
                     "You MUST only cite papers from the 'Candidate Papers' list above. Use DOI if present; otherwise use the title exactly as shown."
                 )
+            if figures_block:
+                extra = (extra + "\n" if extra else "") + (
+                    "You may reference the notebook figures listed above when describing results or methods. "
+                    "When describing a figure, use its index (e.g., 'Figure [1]') and be concise."
+                )
+            if output_metrics:
+                extra = (extra + "\n" if extra else "") + (
+                    "Use the reported output metrics above when summarizing results. Reference numeric values exactly when appropriate."
+                )
 
             # For literature_review we can add an explicit guidance about length / synthesis
             section_label = section.replace('_', ' ').title()
@@ -525,5 +574,147 @@ def generate_sections(
             produced[section] = text
             preview = (text[:200] + '...') if len(text) > 200 else text
             print(f"[LLM] Produced {section}: {preview!r}")
+
+    # --- New: Request one-sentence captions for notebook figures if any ---
+    figs = facts.get("figures") or []
+    if figs:
+        try:
+            # Build a richer figures prompt by including: caption_hint, code snippet, output first line, and run metrics
+            figs_list_block = []
+            # helper to get output snippet for a cell
+            outputs_by_cell = {}
+            for o in facts.get("outputs", []) or []:
+                ci = o.get("cell_index")
+                if ci is None:
+                    continue
+                # pick first non-empty line as representative
+                text = (o.get("text") or "") + " " + (o.get("error") or "")
+                first = ""
+                for ln in (text or "").splitlines():
+                    ln2 = ln.strip()
+                    if ln2:
+                        first = ln2
+                        break
+                outputs_by_cell[ci] = first
+
+            code_blocks = facts.get("code") or []
+
+            # create per-figure descriptive entries
+            for idx, f in enumerate(figs, start=1):
+                fname = os.path.basename(f.get("path") or "")
+                hint = f.get("caption_hint") or ""
+                ci = f.get("cell_index")
+                code_snip = ""
+                if isinstance(code_blocks, list) and ci is not None and 0 <= ci < len(code_blocks):
+                    cb = code_blocks[ci] or ""
+                    # include only short snippet (first 2-4 lines)
+                    lines = [ln for ln in cb.splitlines() if ln.strip()]
+                    code_snip = " | code: " + " ".join(lines[:4]) if lines else ""
+                    # trim to reasonable length
+                    if len(code_snip) > 300:
+                        code_snip = code_snip[:300] + "..."
+                output_first = outputs_by_cell.get(ci, "")
+                metrics = facts.get("output_metrics") or facts.get("final_metrics") or {}
+                metrics_str = ""
+                if isinstance(metrics, dict) and metrics:
+                    metrics_str = " | metrics: " + ", ".join(f"{k}={v}" for k, v in metrics.items())
+
+                entry = f"[{idx}] {fname} | hint: {hint or '(none)'} | cell: {ci}"
+                if code_snip:
+                    entry += f" {code_snip}"
+                if output_first:
+                    entry += f" | output: {output_first[:200]}"
+                if metrics_str:
+                    entry += f" {metrics_str}"
+                figs_list_block.append(entry)
+
+            figs_prompt = (
+                f"{SYSTEM_PROMPT}\n\n"
+                f"Below are the notebook figures selected as potentially useful for the paper, with context (filename, hint, code snippet, output snippet, and run metrics):\n\n"
+                f"{chr(10).join(figs_list_block)}\n\n"
+                "For each figure above produce a single concise (one-sentence) caption suitable for a research paper. "
+                "Captions should be factual, describe the key content of the figure, may mention numeric metrics if the figure visualizes them, "
+                "and be written in plain English. Return ONLY a JSON array of strings (one string per figure in the same order). "
+                "Example: [\"Caption 1\", \"Caption 2\"]\n"
+            )
+
+            raw_caps = _safe_invoke(llm, figs_prompt)
+            caps_list = _extract_json_array(raw_caps)
+
+            # If the model returned fewer captions than figures, attempt a robust fallback:
+            if len(caps_list) < len(figs):
+                # Try to extract newline-separated plain lines as backup (very tolerant)
+                extra_lines = [ln.strip() for ln in str(raw_caps).splitlines() if ln.strip()]
+                for ln in extra_lines:
+                    if ln not in caps_list and len(caps_list) < len(figs):
+                        # remove surrounding quotes/brackets
+                        ln_clean = ln.strip().strip('`"\' ,[]')
+                        if ln_clean:
+                            caps_list.append(ln_clean)
+                # finally pad with hints
+            # Normalize length: ensure we have same number as figs (truncate or pad with fallback)
+            final_caps: List[str] = []
+            for i, f in enumerate(figs):
+                if i < len(caps_list):
+                    c = caps_list[i].strip()
+                    # ensure single-line short caption
+                    c = re.sub(r"\s+", " ", c).strip()
+                    # if caption is too long, shorten to first sentence
+                    if len(c.split()) > 40:
+                        # take first sentence if available
+                        sents = re.split(r'(?<=[.!?])\s+', c)
+                        c = sents[0] if sents and sents[0] else " ".join(c.split()[:30]) + "..."
+                    final_caps.append(c)
+                else:
+                    # fallback: prefer caption_hint, otherwise output snippet, otherwise filename
+                    hint = f.get("caption_hint") or ""
+                    ci = f.get("cell_index")
+                    output_snip = outputs_by_cell.get(ci, "")
+                    fallback_caption = ""
+                    if hint:
+                        fallback_caption = f"{hint}."
+                    elif output_snip:
+                        # first non-empty output line truncated
+                        fallback_caption = (output_snip[:140] + "...") if len(output_snip) > 140 else output_snip
+                    else:
+                        fallback_caption = os.path.basename(f.get("path") or "")
+                    # ensure it's one sentence
+                    fallback_caption = re.sub(r"\s+", " ", fallback_caption).strip()
+                    if not fallback_caption.endswith("."):
+                        fallback_caption = fallback_caption.rstrip(".") + "."
+                    final_caps.append(fallback_caption)
+
+            produced["figure_captions"] = json.dumps(final_caps, ensure_ascii=False)
+            print(f"[LLM] Produced {len(final_caps)} figure captions.")
+        except Exception as e:
+            # non-fatal: build deterministic captions from hints/outputs
+            print(f"[Figure Captions] failed to produce captions via LLM: {e}")
+            deterministic_caps = []
+            outputs_by_cell = {}
+            for o in facts.get("outputs", []) or []:
+                ci = o.get("cell_index")
+                text = (o.get("text") or "") + " " + (o.get("error") or "")
+                first = ""
+                for ln in (text or "").splitlines():
+                    ln2 = ln.strip()
+                    if ln2:
+                        first = ln2
+                        break
+                outputs_by_cell[ci] = first
+            for f in figs:
+                hint = f.get("caption_hint") or ""
+                ci = f.get("cell_index")
+                out_snip = outputs_by_cell.get(ci, "")
+                if hint:
+                    cap = hint
+                elif out_snip:
+                    cap = out_snip[:160]
+                else:
+                    cap = os.path.basename(f.get("path") or "")
+                cap = re.sub(r"\s+", " ", cap).strip()
+                if not cap.endswith("."):
+                    cap = cap.rstrip(".") + "."
+                deterministic_caps.append(cap)
+            produced["figure_captions"] = json.dumps(deterministic_caps, ensure_ascii=False)
 
     return produced

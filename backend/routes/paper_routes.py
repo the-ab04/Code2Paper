@@ -11,6 +11,7 @@ import uuid
 import re
 import importlib
 import logging
+import json
 
 from db.base import get_db
 from db import crud, schemas
@@ -31,8 +32,10 @@ OUTPUT_DIR = os.path.join(STORAGE_ROOT, "outputs")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# Tunables
-MAX_CANDIDATE_PAPERS = int(os.getenv("MAX_CANDIDATE_PAPERS", "10"))  # how many candidate papers we pass to LLM
+# Tunables (defaults can be overridden via env or request body)
+DEFAULT_MAX_CANDIDATE_PAPERS = int(os.getenv("MAX_CANDIDATE_PAPERS", "10"))  # how many candidate papers we pass to LLM
+DEFAULT_MAX_FIGURES = int(os.getenv("MAX_FIGURES", "6"))  # how many figures to include in DOCX
+MIN_IMAGE_BYTES = int(os.getenv("MIN_IMAGE_BYTES", str(8 * 1024)))  # 8KB default minimum to consider image "real"
 
 CITATION_PATTERN = re.compile(r"\[CITATION:\s*([^\]]+)\]", re.I)
 
@@ -41,6 +44,8 @@ class GenerateRequest(BaseModel):
     """Request body schema for /generate/{run_id}"""
     sections: Optional[List[str]] = None
     use_rag: bool = True
+    max_papers: Optional[int] = None      # override how many candidate papers to pass to LLM
+    max_figures: Optional[int] = None     # override how many figures to include in final document
 
 
 router = APIRouter(prefix="/api/paper", tags=["paper"])
@@ -67,7 +72,7 @@ def upload_notebook(file: UploadFile = File(...), db: Session = Depends(get_db))
     try:
         with open(save_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to save uploaded file")
         raise HTTPException(status_code=500, detail="Failed to save uploaded file")
 
@@ -145,6 +150,55 @@ def _normalize_requested_sections(sections: Optional[List[str]]) -> Optional[Lis
     return out or None
 
 
+def _select_useful_images(images: List[Dict[str, Any]], max_figures: int) -> List[Dict[str, Any]]:
+    """
+    Select up to `max_figures` useful images from the extracted images list using a heuristic:
+      - prefer images that already have a caption
+      - next prefer images with an explicit 'score' (higher better)
+      - next prefer larger file size (above MIN_IMAGE_BYTES)
+    Each image is expected to be a dict with at least 'path' and optional 'caption','score','cell_index','mime'.
+    """
+    if not images:
+        return []
+
+    def _size(path: str) -> int:
+        try:
+            return os.path.getsize(path)
+        except Exception:
+            return 0
+
+    norm = []
+    seen_paths = set()
+    for im in images:
+        p = im.get("path")
+        if not p:
+            continue
+        p_abs = os.path.abspath(p)
+        if p_abs in seen_paths:
+            continue
+        if not os.path.exists(p_abs):
+            continue
+        seen_paths.add(p_abs)
+        size = _size(p_abs)
+        caption_flag = 1 if im.get("caption") else 0
+        try:
+            score_val = float(im.get("score")) if im.get("score") is not None else 0.0
+        except Exception:
+            score_val = 0.0
+        size_flag = 1 if size >= MIN_IMAGE_BYTES else 0
+        # keep original dict but normalize path to absolute
+        item = dict(im)
+        item["path"] = p_abs
+        item["size"] = size
+        norm.append((caption_flag, score_val, size_flag, size, item))
+
+    # Sort descending by (caption_flag, score_val, size_flag, size)
+    norm.sort(key=lambda t: (t[0], t[1], t[2], t[3]), reverse=True)
+
+    selected = [t[-1] for t in norm[:max_figures]]
+    return selected
+
+
 @router.post("/generate/{run_id}")
 def generate_paper(
     run_id: int,
@@ -161,7 +215,8 @@ def generate_paper(
       4. persist any remaining candidate papers (best-effort)
       5. enrich/resolve citation placeholders and persist citations
       6. ALWAYS assemble final References from DB citations (ordered)
-      7. render DOCX, update run status and return download URL
+      7. normalize/remove figure placeholders (final cleanup)
+      8. render DOCX, update run status and return download URL
     """
     run = crud.get_run(db, run_id)
     if not run:
@@ -185,35 +240,49 @@ def generate_paper(
         else:
             gen_requested = requested_sections
 
-    # Step 2: Build better queries using facts summary + datasets, methods, metrics, model hints
+    # Step 2: Build better queries using facts summary + datasets, methods, metrics, model hints, final metrics
     queries: List[str] = []
 
     # code_parser may produce a short summary or 'facts_summary' - prefer that
     if facts.get("summary"):
         queries.append(facts["summary"])
-    # datasets, methods, frameworks, model_defs, metrics
+
+    # include datasets, methods, frameworks, model_defs, metrics
     queries.extend([d for d in (facts.get("datasets") or []) if d])
     queries.extend([m for m in (facts.get("methods") or []) if m])
     queries.extend([m for m in (facts.get("model_defs") or []) if m])
     queries.extend([f for f in (facts.get("frameworks") or []) if f])
     queries.extend([m for m in (facts.get("metrics") or []) if m])
 
+    # include final numeric metrics (if any) as short "metric=value" tokens to bias search
+    final_metrics = facts.get("final_metrics") or {}
+    if isinstance(final_metrics, dict):
+        for k, v in final_metrics.items():
+            try:
+                queries.append(f"{k}={v}")
+            except Exception:
+                continue
+
     # fallback
     if not queries:
         queries = ["machine learning"]
+
+    # Determine max candidate papers to request/persist
+    max_papers = payload.max_papers if (payload.max_papers and payload.max_papers > 0) else DEFAULT_MAX_CANDIDATE_PAPERS
 
     external_papers: List[Dict[str, Any]] = []
     if payload.use_rag:
         try:
             # Persist & index candidate papers (returns persisted entries when possible)
-            persisted = find_and_persist_papers(queries, run.id, db, max_results=10)
+            persisted = find_and_persist_papers(queries, run.id, db, max_results=max_papers)
+            # find_and_persist_papers may return None on failure; guard it
             external_papers = persisted or []
             logger.info("Persisted and indexed %d external papers for run %d", len(external_papers), run.id)
-        except Exception as e:
+        except Exception:
             logger.exception("[Paper Finder] find_and_persist_papers failed, falling back to find_papers()")
             try:
-                external_papers = find_papers(queries, max_results=5)
-            except Exception as e2:
+                external_papers = find_papers(queries, max_results=max(1, max_papers // 2))
+            except Exception:
                 logger.exception("[Paper Finder] find_papers() failed as well")
                 external_papers = []
 
@@ -222,7 +291,7 @@ def generate_paper(
     try:
         llm_mod = importlib.import_module("services.llm_generator")
         generate_sections_fn = getattr(llm_mod, "generate_sections")
-    except Exception as e:
+    except Exception:
         logger.exception("failed to import services.llm_generator.generate_sections")
         raise HTTPException(status_code=500, detail="LLM generation helper not available (import error)")
 
@@ -233,11 +302,11 @@ def generate_paper(
         logger.warning("Failed to set run status to 'generating' for run %s", run.id)
 
     try:
-        # Limit candidate papers passed to the LLM to a reasonable number
-        candidate_list = external_papers[:MAX_CANDIDATE_PAPERS] if external_papers else None
+        # Limit candidate papers passed to the LLM
+        candidate_list = external_papers[:max_papers] if external_papers else None
 
         if candidate_list:
-            logger.info("Calling LLM with %d candidate papers (limited to %d)", len(candidate_list), MAX_CANDIDATE_PAPERS)
+            logger.info("Calling LLM with %d candidate papers", len(candidate_list))
             sections: Dict[str, str] = generate_sections_fn(
                 facts,
                 sections_to_generate=gen_requested,
@@ -277,7 +346,6 @@ def generate_paper(
         logger.exception("failed to log LLM outputs")
 
     # Step 4: Persist candidate papers that were returned by find_papers() but not already persisted.
-    # find_and_persist_papers likely already persisted items (returned with 'db_id').
     try:
         if external_papers:
             for p in external_papers:
@@ -295,9 +363,9 @@ def generate_paper(
                         pdf_path=p.get("pdf_path", None),
                     )
                     crud.add_paper(db, run.id, paper_schema)
-                except Exception as e:
-                    logger.warning("Failed to add candidate paper to DB (non-fatal): %s", e)
-    except Exception as e:
+                except Exception:
+                    logger.warning("Failed to add candidate paper to DB (non-fatal)")
+    except Exception:
         logger.exception("unexpected error while persisting candidate papers")
 
     # Step 5: Enrich references if there are placeholders
@@ -314,8 +382,94 @@ def generate_paper(
             unresolved = sections.get("_unresolved_placeholders")
             if unresolved:
                 logger.info("[Citation Manager] Unresolved placeholders: %s", unresolved)
-        except Exception as e:
-            logger.exception("[Citation Manager] error while enriching references: %s", e)
+        except Exception:
+            logger.exception("[Citation Manager] error while enriching references")
+
+    # -------------------------
+    # FIGURE PLACEHOLDERS HANDLING:
+    # - Remove figure placeholders from abstract & conclusion entirely.
+    # - Normalize figure placeholders in results & introduction to "Figure N".
+    # - Keep citation placeholders "[CITATION: ...]" intact.
+    # -------------------------
+
+    def _normalize_figure_placeholders(text: Optional[str]) -> Optional[str]:
+        """
+        Normalize many common figure placeholder variants into 'Figure N' (capital F).
+        Handles variants like:
+           - Figure[1], Figure [1], Figure (1), Figure.1
+           - Fig 1, Fig. 1, Fig[1], Fig:[1], Fig:(1)
+           - fig1, fig.1, figure1
+        Returns original text unchanged if None/empty.
+        Conservative: only targets patterns that include 'fig'/'figure' token.
+        """
+        if not text or not isinstance(text, str):
+            return text
+
+        t = text
+
+        # Pattern 1: forms with optional punctuation and optional brackets/parentheses around the number
+        pat = re.compile(
+            r'\b(?:fig(?:\.|ure)?|figure)\s*[:\.\-]?\s*[\(\[\s]*\s*(\d{1,4})\s*[\)\]\s]*',
+            flags=re.I,
+        )
+
+        def _repl(m):
+            num = m.group(1)
+            return f"Figure {num}"
+
+        t = pat.sub(_repl, t)
+
+        # Pattern 2: tightly joined forms like "fig1" or "figure1"
+        pat2 = re.compile(r'\b(?:fig(?:ure)?)(\d{1,4})\b', flags=re.I)
+        t = pat2.sub(lambda m: f"Figure {m.group(1)}", t)
+
+        # Collapse multiple spaces introduced by replacements
+        t = re.sub(r'\s{2,}', ' ', t).strip()
+        return t
+
+    def _remove_figure_placeholders(text: Optional[str]) -> Optional[str]:
+        """
+        Remove common figure placeholder mentions entirely from text.
+        Includes variants with 'fig'/'figure' and bracket/parenthesis/punctuation forms.
+        Leaves other numeric bracket forms (like [1]) untouched unless prefixed by fig/figure token.
+        """
+        if not text or not isinstance(text, str):
+            return text
+
+        t = text
+
+        # Remove token forms like "Figure [1]", "Fig. (1):", "fig1", "Figure.1"
+        pat_remove = re.compile(
+            r'\b(?:fig(?:\.|ure)?|figure)\s*[:\.\-]?\s*[\(\[\s]*\s*\d{1,4}\s*[\)\]\s]*\s*[:\.\-]?',
+            flags=re.I,
+        )
+        t = pat_remove.sub("", t)
+
+        # Also remove tight "fig1" / "figure1"
+        pat_tight = re.compile(r'\b(?:fig(?:ure)?)(\d{1,4})\b', flags=re.I)
+        t = pat_tight.sub("", t)
+
+        # Collapse leftover punctuation and extra spaces
+        t = re.sub(r'\s{2,}', ' ', t)
+        # remove stray sequences like " ,", " .", " :" created by removal
+        t = re.sub(r'\s+([,.:;])', r'\1', t)
+        t = t.strip()
+        return t
+
+    try:
+        if isinstance(sections, dict):
+            # Remove from abstract & conclusion entirely
+            if sections.get("abstract") and isinstance(sections.get("abstract"), str):
+                sections["abstract"] = _remove_figure_placeholders(sections["abstract"])
+            if sections.get("conclusion") and isinstance(sections.get("conclusion"), str):
+                sections["conclusion"] = _remove_figure_placeholders(sections["conclusion"])
+
+            # Normalize placeholders to "Figure N" in results and introduction (so they remain but canonical)
+            for key in ("results", "introduction"):
+                if sections.get(key) and isinstance(sections.get(key), str):
+                    sections[key] = _normalize_figure_placeholders(sections[key])
+    except Exception:
+        logger.exception("failed to process figure placeholders in sections")
 
     # Build final References section from DB citations (deterministically)
     try:
@@ -362,7 +516,45 @@ def generate_paper(
     if requested_sections is not None and "references" not in requested_sections:
         sections.pop("references", None)
 
-    # Step 6: Render DOCX to outputs
+    # Step 6: Select useful images and attach figure captions (if LLM produced them)
+    try:
+        # Prefer facts["figures"] (selected by parser) else facts["images"]
+        figures_from_parser = []
+        if isinstance(facts, dict):
+            if facts.get("figures"):
+                figures_from_parser = facts.get("figures") or []
+            elif facts.get("images"):
+                # fall back to raw saved images
+                figures_from_parser = facts.get("images") or []
+
+        max_figs = payload.max_figures if (payload.max_figures and payload.max_figures > 0) else DEFAULT_MAX_FIGURES
+        selected_images = _select_useful_images(figures_from_parser, max_figs)
+
+        # If LLM returned figure captions (e.g., sections["figure_captions"]), attach them by index
+        fig_captions = sections.get("figure_captions") or sections.get("figureCaptions") or None
+        if fig_captions:
+            parsed_caps = []
+            if isinstance(fig_captions, (list, tuple)):
+                parsed_caps = [str(x).strip() for x in fig_captions]
+            elif isinstance(fig_captions, str):
+                try:
+                    parsed = json.loads(fig_captions)
+                    if isinstance(parsed, list):
+                        parsed_caps = [str(x).strip() for x in parsed]
+                except Exception:
+                    # last-resort: extract quoted strings
+                    parsed_caps = re.findall(r'"([^"]+)"', fig_captions) or re.findall(r"'([^']+)'", fig_captions)
+            # attach parsed captions in order to selected images where missing
+            for idx, im in enumerate(selected_images):
+                if not im.get("caption") and idx < len(parsed_caps):
+                    cap = parsed_caps[idx]
+                    if cap:
+                        im["caption"] = cap
+    except Exception:
+        logger.exception("failed to select/attach images")
+        selected_images = []
+
+    # Step 7: Render DOCX to outputs; pass selected images only
     file_id = str(uuid.uuid4())
     out_path = os.path.join(OUTPUT_DIR, f"{file_id}.docx")
     try:
@@ -377,13 +569,15 @@ def generate_paper(
                 title_for_doc = raw_name
 
         logger.info("[File] Rendering DOCX with title: %s -> %s", title_for_doc, out_path)
-        render_docx(sections, out_file=out_path, title=title_for_doc)
+
+        # Pass selected images into render_docx so figures can be embedded
+        render_docx(sections, out_file=out_path, title=title_for_doc, images=selected_images)
     except Exception:
         logger.exception("[File Generator] error while rendering DOCX")
         crud.update_run_status(db, run.id, status="failed")
         raise HTTPException(status_code=500, detail="Failed to render document")
 
-    # Step 7: Update DB run status
+    # Step 8: Update DB run status
     try:
         crud.update_run_status(db, run.id, status="completed", output_file=out_path)
     except Exception:
