@@ -1,6 +1,6 @@
 # 🧠 Code2Paper
 
-> Automatically generate research papers from Machine Learning code using Large Language Models (LLMs)
+Automatically generate research papers from Machine Learning code using Large Language Models (LLMs)
 
 ---
 
@@ -79,12 +79,6 @@ Code2Paper/
 │   ├── package.json
 │   └── README.md
 │
-├── sample_inputs/
-│   ├── sample_model.py
-│   └── sample_notebook.ipynb
-│
-├── outputs/
-│   └── example_output.docx
 │
 ├── .gitignore
 ├── LICENSE
@@ -136,16 +130,3 @@ npm start
 
 >⚠️ All of these folders are included in the repository as empty directories only (using .gitkeep).
 Actual contents are ignored via .gitignore.
-
-## 📌 Project Status
-🚧 In Progress
-
-
-## 🙌 Contributors
-| Name                        | GitHub                                       |
-| --------------------------- | -------------------------------------------- |
-| **Endla Akhil Balaji**      | [@the-ab04](https://github.com/the-ab04)     |
-| **Adi Sai Kiran**           | [@adhi8724r](https://github.com/adhi8724r)   |
-| **Mandala Sriman Narayana** | [@Sriman117](https://github.com/Sriman117)   |
-| **Mohammad Sohel**          | [@sohellucky](https://github.com/sohellucky) |
-
