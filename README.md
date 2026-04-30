@@ -1,6 +1,13 @@
 # 🧠 Code2Paper
+![Python](https://img.shields.io/badge/Python-3.11-blue)
+![FastAPI](https://img.shields.io/badge/FastAPI-Backend-green)
+![React](https://img.shields.io/badge/React-Frontend-blue)
+![LLM](https://img.shields.io/badge/LLM-Groq-purple)
+![RAG](https://img.shields.io/badge/RAG-Retrieval--Augmented-orange)
+![Qdrant](https://img.shields.io/badge/Qdrant-VectorDB-red)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Database-blue)
 
-Automatically generate research papers from Machine Learning code using Large Language Models (LLMs)
+Automatically generate structured research papers from Machine Learning notebooks and scripts using Large Language Models (LLMs) and Retrieval-Augmented Generation (RAG).
 
 ---
 
@@ -9,6 +16,32 @@ Automatically generate research papers from Machine Learning code using Large La
 Code2Paper is an intelligent research assistant that converts your machine learning notebooks or scripts into fully formatted, research-style papers.
 
 It leverages Large Language Models (LLMs) to analyze experiments, summarize methods, and generate coherent academic-style content — complete with references and structured sections such as Abstract, Introduction, Literature Review, Methodology, Results, and Conclusion.
+
+---
+## 📸 System Preview
+
+### 🏠 Landing Page
+
+<p align="center">
+  <img src="assets/landing_page.png" width="700"/>
+</p>
+
+---
+
+### 📤 Upload Notebook Interface
+
+<p align="center">
+  <img src="assets/upload_notebook.png" width="700"/>
+</p>
+
+---
+
+### 🧩 Section Selection Interface
+
+<p align="center">
+  <img src="assets/section_selection.png" width="700"/>
+</p>
+
 
 ---
 
@@ -31,7 +64,7 @@ It leverages Large Language Models (LLMs) to analyze experiments, summarize meth
 | ------------------- | -------------------------------------------------- |
 | **Frontend**        | React.js, Tailwind CSS                             |
 | **Backend**         | FastAPI (Python)                                   |
-| **Database**        | SQLite (via SQLAlchemy ORM)                        |
+| **Database**        | PostgreSQL                                         |
 | **AI Models**       | Groq API (LLM), optional Hugging Face Transformers |
 | **Citations**       | CrossRef + Paper Finder Integration                |
 | **Document Export** | Python-docx                                        |
@@ -88,7 +121,7 @@ Code2Paper/
 
 ---
 
-## 🧪 Example Workflow
+## 🔍 How It Works
 
 1. Upload a .ipynb or .py file containing your ML experiment
 2. Select which sections to generate (Abstract, Literature Review, etc.)
