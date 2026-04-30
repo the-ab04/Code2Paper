@@ -45,7 +45,7 @@ It leverages Large Language Models (LLMs) to analyze experiments, summarize meth
 ```
 Code2Paper/
 ├── backend/
-│   ├── app.py                     # 🚀 FastAPI entrypoint
+│   ├── app.py                     # FastAPI entrypoint
 │   ├── routes/
 │   │   └── paper_routes.py        # API routes (upload, generate, download)
 │   ├── services/
@@ -74,7 +74,7 @@ Code2Paper/
 │   │   │   └── SignIn.jsx
 │   │   ├── components/
 │   │   ├── api/
-│   │   │   └── client.js          # Axios client configuration
+│   │   │   └── client.js          
 │   │   └── App.js
 │   ├── package.json
 │   └── README.md
